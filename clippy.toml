@@ -1,0 +1,4 @@
+# `module_name_repetitions` is noisy for crates that intentionally mirror workspace
+# package names (e.g., `components::component_catalog`). Keeping the names aligned helps
+# discoverability when navigating the workspace, so we allow the lint globally.
+allow = ["clippy::module_name_repetitions"]
