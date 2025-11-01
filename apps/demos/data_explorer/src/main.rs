@@ -76,6 +76,8 @@ struct DataExplorerApp {
     column_scale: f32,
     selected_id: Option<u64>,
     feature_flags: FeatureFlags,
+    cached_view: Vec<usize>,
+    view_dirty: bool,
 }
 
 impl DataExplorerApp {
@@ -95,6 +97,8 @@ impl DataExplorerApp {
             column_scale: 1.0,
             selected_id: None,
             feature_flags: FeatureFlags::from_env(),
+            cached_view: Vec::new(),
+            view_dirty: true,
         }
     }
 
@@ -103,51 +107,73 @@ impl DataExplorerApp {
         self.total_rows = self.rows.len();
         self.page = 0;
         self.selected_id = None;
+        self.view_dirty = true;
         cx.notify();
     }
 
-    fn benchmark(&self) -> VirtualListBenchmark {
+    fn benchmark(&mut self) -> VirtualListBenchmark {
+        self.ensure_view();
         VirtualListBenchmark {
-            total_rows: self.filtered_rows().len(),
+            total_rows: self.cached_view.len(),
             row_height: self.row_height,
             viewport_height: self.viewport_height,
         }
     }
 
-    fn filtered_rows(&self) -> Vec<&Transaction> {
-        let mut rows: Vec<&Transaction> = self.rows.iter().collect();
+    fn ensure_view(&mut self) {
+        if !self.view_dirty {
+            return;
+        }
+
+        let mut indices: Vec<usize> = (0..self.rows.len()).collect();
+
         if let Some(category) = self.filter_category {
-            rows.retain(|txn| txn.category == category);
+            indices.retain(|&idx| self.rows[idx].category == category);
         }
         if let Some(status) = self.filter_status {
-            rows.retain(|txn| txn.status == status);
+            indices.retain(|&idx| self.rows[idx].status == status);
         }
 
         match self.sort_key {
-            SortKey::Account => rows.sort_by(|a, b| a.account.cmp(&b.account)),
-            SortKey::Category => rows.sort_by(|a, b| a.category.cmp(&b.category)),
-            SortKey::Amount => rows.sort_by(|a, b| a.amount.total_cmp(&b.amount)),
-            SortKey::Status => rows.sort_by(|a, b| a.status.cmp(&b.status)),
+            SortKey::Account => {
+                indices.sort_by(|&a, &b| self.rows[a].account.cmp(&self.rows[b].account))
+            }
+            SortKey::Category => {
+                indices.sort_by(|&a, &b| self.rows[a].category.cmp(&self.rows[b].category))
+            }
+            SortKey::Amount => {
+                indices.sort_by(|&a, &b| self.rows[a].amount.total_cmp(&self.rows[b].amount))
+            }
+            SortKey::Status => {
+                indices.sort_by(|&a, &b| self.rows[a].status.cmp(&self.rows[b].status))
+            }
         }
 
         if !self.ascending {
-            rows.reverse();
+            indices.reverse();
         }
 
-        rows
+        self.cached_view = indices;
+        self.view_dirty = false;
+    }
+
+    fn filtered_count(&mut self) -> usize {
+        self.ensure_view();
+        self.cached_view.len()
     }
 
     fn page_size(&self) -> usize {
         (self.viewport_height / self.row_height).ceil() as usize + 5
     }
 
-    fn paged_rows(&self) -> Vec<&Transaction> {
-        let filtered = self.filtered_rows();
+    fn paged_rows(&mut self) -> Vec<&Transaction> {
+        self.ensure_view();
         let start = self.page.saturating_mul(self.page_size());
-        filtered
-            .into_iter()
+        self.cached_view
+            .iter()
             .skip(start)
             .take(self.page_size())
+            .map(|&idx| &self.rows[idx])
             .collect()
     }
 
@@ -158,6 +184,7 @@ impl DataExplorerApp {
             self.sort_key = column;
             self.ascending = true;
         }
+        self.view_dirty = true;
         cx.notify();
     }
 
@@ -168,6 +195,7 @@ impl DataExplorerApp {
             self.filter_category = category;
         }
         self.page = 0;
+        self.view_dirty = true;
         cx.notify();
     }
 
@@ -178,6 +206,7 @@ impl DataExplorerApp {
             self.filter_status = status;
         }
         self.page = 0;
+        self.view_dirty = true;
         cx.notify();
     }
 
@@ -192,7 +221,8 @@ impl DataExplorerApp {
     }
 
     fn scroll(&mut self, direction: isize, cx: &mut Context<Self>) {
-        let total_pages = (self.filtered_rows().len() + self.page_size() - 1) / self.page_size();
+        self.ensure_view();
+        let total_pages = (self.cached_view.len() + self.page_size() - 1) / self.page_size();
         let next =
             (self.page as isize + direction).clamp(0, total_pages.saturating_sub(1) as isize);
         self.page = next as usize;
@@ -200,7 +230,7 @@ impl DataExplorerApp {
     }
 
     fn render_toolbar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let total_filtered = self.filtered_rows().len();
+        let total_filtered = self.filtered_count();
         let bench = self.benchmark();
         let estimated_cost = bench.estimated_render_cost();
         let fps = (144.0 - (self.total_rows as f32 / 25_000.0)).clamp(32.0, 144.0);
@@ -321,6 +351,7 @@ impl DataExplorerApp {
                             .label(Text::new("Ascending"))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.ascending = !this.ascending;
+                                this.view_dirty = true;
                                 cx.notify();
                             })),
                     ),
