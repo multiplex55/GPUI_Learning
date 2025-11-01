@@ -1,0 +1,31 @@
+[workspace]
+members = [
+    "apps/workbench",
+    "apps/gallery",
+    "apps/demos/data_explorer",
+    "apps/demos/markdown_notes",
+    "apps/demos/code_playground",
+    "apps/demos/dashboard",
+    "crates/designsystem",
+    "crates/components",
+    "crates/data",
+    "crates/platform",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/multiplex55/GPUI_Learning"
+publish = false
+
+[workspace.metadata]
+name = "gpui_learning"
+
+[workspace.dependencies]
+gpui = "=0.2.2"
+designsystem = { path = "crates/designsystem" }
+components = { path = "crates/components" }
+data = { path = "crates/data" }
+platform = { path = "crates/platform" }
