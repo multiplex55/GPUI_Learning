@@ -26,18 +26,26 @@ pub struct Transaction {
 /// Broad transaction buckets for demo data generation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum TransactionCategory {
+    /// Transactions that reflect marketplace fees or merchant revenue.
     Commerce,
+    /// Cloud hosting and platform infrastructure expenses.
     Infrastructure,
+    /// Campaign and advertising spend tracked by marketing teams.
     Marketing,
+    /// Compensation entries for payroll processing.
     Payroll,
+    /// Miscellaneous adjustments that don't fall into a core bucket.
     Misc,
 }
 
 /// Simplified approval workflow used by demos.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum TransactionStatus {
+    /// The transaction has been created but not yet settled.
     Pending,
+    /// The payment has cleared and been reconciled.
     Settled,
+    /// Requires analyst review because automated checks raised a flag.
     Flagged,
 }
 
@@ -98,7 +106,7 @@ impl Iterator for TransactionFactory {
             _ => TransactionStatus::Settled,
         };
 
-        let amount = match category {
+        let amount: f64 = match category {
             TransactionCategory::Commerce => self.rng.gen_range(40.0..200.0),
             TransactionCategory::Marketing => -self.rng.gen_range(120.0..750.0),
             TransactionCategory::Payroll => -self.rng.gen_range(2_000.0..8_500.0),

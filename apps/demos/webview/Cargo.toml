@@ -1,14 +1,17 @@
 [package]
-name = "data_explorer"
+name = "webview_demo"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = false
 
+[features]
+default = []
+webview = []
+
 [dependencies]
 gpui.workspace = true
-data.workspace = true
+designsystem.workspace = true
 components.workspace = true
 platform.workspace = true
-designsystem.workspace = true
