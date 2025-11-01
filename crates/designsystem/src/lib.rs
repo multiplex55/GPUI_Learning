@@ -1,5 +1,9 @@
+#![doc = include_str!("../README.md")]
+#![warn(clippy::pedantic, missing_docs, unreachable_pub)]
+
 /// Returns the default primary color used across the workspace design system.
-pub fn primary_color() -> &'static str {
+#[must_use]
+pub const fn primary_color() -> &'static str {
     "#0f172a"
 }
 
