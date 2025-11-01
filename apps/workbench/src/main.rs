@@ -1,6 +1,10 @@
+use std::fmt::Write as _;
+
+use chrono::Utc;
 use components::{
     docs::render_snippet, DashboardCard, DockLayoutPanel, KpiGrid, KpiMetric, ThemeSwitch,
 };
+use data::VirtualListBenchmark;
 use designsystem::{install_defaults, IconName, ThemeRegistry, ThemeVariant};
 use gpui::{
     div, prelude::*, px, size, App, Application, Bounds, Context, Keystroke, SharedString, Window,
@@ -23,7 +27,8 @@ use gpui_component::{
     ContextModal,
 };
 use platform::{
-    bootstrap, CommandBus, ConfigStore, LayoutState, LocalizationRegistry, WorkspaceConfig,
+    bootstrap, BenchmarkRunRecord, CommandBus, ConfigStore, EditorBenchmarkSummary, LayoutState,
+    LocalizationRegistry, VirtualizationBenchmarkSummary, WorkspaceConfig,
 };
 use unic_langid::{langid, LanguageIdentifier};
 
@@ -76,6 +81,7 @@ fn seed_localization() -> LocalizationRegistry {
             ("nav.dashboard", "Dashboard"),
             ("nav.gallery", "Gallery"),
             ("nav.demos", "Demos"),
+            ("nav.performance", "Performance"),
             (
                 "dashboard.subtitle",
                 "Cross-application workspace shell with dockable analytics",
@@ -113,6 +119,7 @@ fn seed_localization() -> LocalizationRegistry {
             ("nav.dashboard", "Panel"),
             ("nav.gallery", "Galería"),
             ("nav.demos", "Demostraciones"),
+            ("nav.performance", "Rendimiento"),
             (
                 "dashboard.subtitle",
                 "Shell analítico con paneles acoplables",
@@ -162,6 +169,7 @@ enum WorkbenchTab {
     Dashboard,
     Gallery,
     Demos,
+    Performance,
 }
 
 impl WorkbenchTab {
@@ -170,6 +178,7 @@ impl WorkbenchTab {
             Self::Dashboard => "nav.dashboard",
             Self::Gallery => "nav.gallery",
             Self::Demos => "nav.demos",
+            Self::Performance => "nav.performance",
         }
     }
 }
@@ -190,6 +199,307 @@ struct FilterState {
     error: Option<SharedString>,
 }
 
+#[derive(Debug, Clone)]
+struct VirtualizationSample {
+    frame: usize,
+    scroll_fps: f32,
+    render_latency_ms: f32,
+    memory_mib: f32,
+}
+
+#[derive(Debug, Clone)]
+struct EditorSample {
+    tick: usize,
+    typing_latency_ms: f32,
+    lsp_latency_ms: f32,
+    memory_mib: f32,
+}
+
+struct PerformanceState {
+    virtualization_rows: usize,
+    virtualization_row_height: f32,
+    virtualization_viewport: f32,
+    virtualization_overscan: usize,
+    virtualization_dense_layout: bool,
+    virtualization_samples: Vec<VirtualizationSample>,
+    editor_lines: usize,
+    editor_highlighting: bool,
+    editor_lsp: bool,
+    editor_samples: Vec<EditorSample>,
+    history: Vec<BenchmarkRunRecord>,
+    run_counter: u64,
+}
+
+impl PerformanceState {
+    fn new(history: Vec<BenchmarkRunRecord>) -> Self {
+        let run_counter = history.last().map(|run| run.id).unwrap_or(0);
+        Self {
+            virtualization_rows: 200_000,
+            virtualization_row_height: 28.0,
+            virtualization_viewport: 540.0,
+            virtualization_overscan: 256,
+            virtualization_dense_layout: false,
+            virtualization_samples: Vec::new(),
+            editor_lines: 200_000,
+            editor_highlighting: true,
+            editor_lsp: true,
+            editor_samples: Vec::new(),
+            history,
+            run_counter,
+        }
+    }
+
+    fn virtualization_benchmark(&self) -> VirtualListBenchmark {
+        VirtualListBenchmark {
+            total_rows: self.virtualization_rows,
+            row_height: self.virtualization_row_height,
+            viewport_height: self.virtualization_viewport,
+        }
+    }
+
+    fn virtualization_summary(&self) -> VirtualizationBenchmarkSummary {
+        let total = self.virtualization_samples.len() as f32;
+        let (avg_fps, avg_latency, peak_memory) = if total.abs() < f32::EPSILON {
+            (0.0, 0.0, 0.0)
+        } else {
+            let sum_fps: f32 = self
+                .virtualization_samples
+                .iter()
+                .map(|sample| sample.scroll_fps)
+                .sum();
+            let sum_latency: f32 = self
+                .virtualization_samples
+                .iter()
+                .map(|sample| sample.render_latency_ms)
+                .sum();
+            let peak_memory = self
+                .virtualization_samples
+                .iter()
+                .fold(0.0, |acc, sample| acc.max(sample.memory_mib));
+            (sum_fps / total, sum_latency / total, peak_memory)
+        };
+
+        VirtualizationBenchmarkSummary {
+            rows: self.virtualization_rows,
+            overscan: self.virtualization_overscan,
+            avg_scroll_fps: (avg_fps * 10.0).round() / 10.0,
+            avg_render_latency_ms: (avg_latency * 10.0).round() / 10.0,
+            peak_memory_mib: (peak_memory * 10.0).round() / 10.0,
+        }
+    }
+
+    fn editor_summary(&self) -> EditorBenchmarkSummary {
+        let total = self.editor_samples.len() as f32;
+        let (avg_typing, avg_lsp, peak_memory) = if total.abs() < f32::EPSILON {
+            (0.0, 0.0, 0.0)
+        } else {
+            let sum_typing: f32 = self
+                .editor_samples
+                .iter()
+                .map(|sample| sample.typing_latency_ms)
+                .sum();
+            let sum_lsp: f32 = self
+                .editor_samples
+                .iter()
+                .map(|sample| sample.lsp_latency_ms)
+                .sum();
+            let peak_memory = self
+                .editor_samples
+                .iter()
+                .fold(0.0, |acc, sample| acc.max(sample.memory_mib));
+            (sum_typing / total, sum_lsp / total, peak_memory)
+        };
+
+        EditorBenchmarkSummary {
+            lines: self.editor_lines,
+            syntax_highlighting: self.editor_highlighting,
+            lsp_enabled: self.editor_lsp,
+            avg_typing_latency_ms: (avg_typing * 10.0).round() / 10.0,
+            avg_lsp_latency_ms: (avg_lsp * 10.0).round() / 10.0,
+            peak_memory_mib: (peak_memory * 10.0).round() / 10.0,
+        }
+    }
+
+    fn synthesize_virtualization_sample(&mut self) -> VirtualizationSample {
+        let frame = self.virtualization_samples.len();
+        let load = self.virtualization_rows as f32 / 200_000.0;
+        let overscan_factor = (self.virtualization_overscan.max(32) as f32) / 256.0;
+        let density_factor = if self.virtualization_dense_layout {
+            1.18
+        } else {
+            1.0
+        };
+        let base_fps = 160.0 / (1.0 + load * 1.65 + overscan_factor * 0.55 * density_factor);
+        let jitter = ((frame % 11) as f32 * 0.35) - 1.1;
+        let scroll_fps = (base_fps + jitter).clamp(18.0, 240.0);
+        let render_latency_ms = (4.0 + load * 20.0 + overscan_factor * 3.8 + density_factor * 2.6)
+            + (frame % 7) as f32 * 0.08;
+        let memory_base = self.virtualization_rows as f32 * 0.000_32;
+        let memory_mib =
+            (memory_base * (1.0 + overscan_factor * 0.48) * density_factor).clamp(64.0, 4096.0);
+
+        VirtualizationSample {
+            frame,
+            scroll_fps,
+            render_latency_ms,
+            memory_mib,
+        }
+    }
+
+    fn synthesize_editor_sample(&mut self) -> EditorSample {
+        let tick = self.editor_samples.len();
+        let load = self.editor_lines as f32 / 200_000.0;
+        let highlight_factor = if self.editor_highlighting { 1.24 } else { 0.82 };
+        let lsp_factor = if self.editor_lsp { 1.35 } else { 0.68 };
+        let typing_latency_ms = (6.0 + load * 21.0) * highlight_factor + (tick % 13) as f32 * 0.06;
+        let lsp_latency_ms = (22.0 + load * 68.0) * lsp_factor + (tick % 9) as f32 * 0.09;
+        let memory_mib = ((self.editor_lines as f32 * 0.000_45) * highlight_factor)
+            + if self.editor_lsp { 220.0 } else { 80.0 };
+
+        EditorSample {
+            tick,
+            typing_latency_ms,
+            lsp_latency_ms,
+            memory_mib: memory_mib.min(8_192.0),
+        }
+    }
+
+    fn capture_virtualization_sample(&mut self) -> VirtualizationSample {
+        let sample = self.synthesize_virtualization_sample();
+        self.virtualization_samples.push(sample.clone());
+        sample
+    }
+
+    fn capture_editor_sample(&mut self) -> EditorSample {
+        let sample = self.synthesize_editor_sample();
+        self.editor_samples.push(sample.clone());
+        sample
+    }
+
+    fn run_full_suite(&mut self) -> BenchmarkRunRecord {
+        self.virtualization_samples.clear();
+        for _ in 0..120 {
+            self.capture_virtualization_sample();
+        }
+
+        self.editor_samples.clear();
+        for _ in 0..120 {
+            self.capture_editor_sample();
+        }
+
+        self.run_counter = self.run_counter.saturating_add(1);
+        let virtualization = self.virtualization_summary();
+        let editor = self.editor_summary();
+        let run = BenchmarkRunRecord {
+            id: self.run_counter,
+            recorded_at: Utc::now(),
+            virtualization,
+            editor,
+        };
+        self.history.push(run.clone());
+        run
+    }
+
+    fn clear_history(&mut self) {
+        self.history.clear();
+        self.run_counter = 0;
+    }
+
+    fn set_history(&mut self, history: Vec<BenchmarkRunRecord>) {
+        self.history = history;
+        self.run_counter = self.history.last().map(|run| run.id).unwrap_or(0);
+    }
+
+    fn adjust_virtualization_rows(&mut self, rows: usize) {
+        self.virtualization_rows = rows;
+        self.virtualization_samples.clear();
+    }
+
+    fn adjust_virtualization_overscan(&mut self, overscan: usize) {
+        self.virtualization_overscan = overscan;
+        self.virtualization_samples.clear();
+    }
+
+    fn toggle_virtualization_density(&mut self, dense: bool) {
+        self.virtualization_dense_layout = dense;
+        self.virtualization_samples.clear();
+    }
+
+    fn adjust_editor_lines(&mut self, lines: usize) {
+        self.editor_lines = lines.max(10_000).min(500_000);
+        self.editor_samples.clear();
+    }
+
+    fn toggle_highlighting(&mut self, enabled: bool) {
+        self.editor_highlighting = enabled;
+        self.editor_samples.clear();
+    }
+
+    fn toggle_lsp(&mut self, enabled: bool) {
+        self.editor_lsp = enabled;
+        self.editor_samples.clear();
+    }
+
+    fn virtualization_series(&self) -> (Vec<(f32, f32)>, Vec<(f32, f32)>, Vec<(f32, f32)>) {
+        let fps = self
+            .virtualization_samples
+            .iter()
+            .map(|sample| (sample.frame as f32, sample.scroll_fps))
+            .collect();
+        let latency = self
+            .virtualization_samples
+            .iter()
+            .map(|sample| (sample.frame as f32, sample.render_latency_ms))
+            .collect();
+        let memory = self
+            .virtualization_samples
+            .iter()
+            .map(|sample| (sample.frame as f32, sample.memory_mib))
+            .collect();
+        (fps, latency, memory)
+    }
+
+    fn editor_series(&self) -> (Vec<(f32, f32)>, Vec<(f32, f32)>, Vec<(f32, f32)>) {
+        let typing = self
+            .editor_samples
+            .iter()
+            .map(|sample| (sample.tick as f32, sample.typing_latency_ms))
+            .collect();
+        let lsp = self
+            .editor_samples
+            .iter()
+            .map(|sample| (sample.tick as f32, sample.lsp_latency_ms))
+            .collect();
+        let memory = self
+            .editor_samples
+            .iter()
+            .map(|sample| (sample.tick as f32, sample.memory_mib))
+            .collect();
+        (typing, lsp, memory)
+    }
+
+    fn editor_preview(&self) -> String {
+        let mut preview = String::new();
+        let preview_lines = self.editor_lines.min(240);
+        for line in 0..preview_lines {
+            let _ = writeln!(
+                preview,
+                "// stress test line {:06} -- synthetic workload",
+                line + 1
+            );
+            let _ = writeln!(
+                preview,
+                "fn hot_path_{line}() {{ let mut acc = {line}; acc += {} as i32; }}",
+                self.editor_lines
+            );
+        }
+        if self.editor_lines > preview_lines {
+            preview.push_str("// … output truncated for preview …\n");
+        }
+        preview
+    }
+}
+
 struct WorkbenchApp {
     theme_registry: ThemeRegistry,
     localization: LocalizationRegistry,
@@ -206,6 +516,7 @@ struct WorkbenchApp {
     filter: FilterState,
     chart_tick: usize,
     theme_variant: ThemeVariant,
+    performance: PerformanceState,
 }
 
 impl WorkbenchApp {
@@ -216,6 +527,7 @@ impl WorkbenchApp {
         workspace_config: WorkspaceConfig,
         config_store: ConfigStore,
     ) -> Self {
+        let history = workspace_config.benchmark_runs.clone();
         let receiver = command_bus.subscribe();
         let mut app = Self {
             theme_variant: theme_registry.active(),
@@ -233,10 +545,13 @@ impl WorkbenchApp {
             wizard: WizardState::default(),
             filter: FilterState::default(),
             chart_tick: 0,
+            performance: PerformanceState::new(history),
         };
         if let Some(state) = app.workspace_config.layout_state.clone() {
             app.apply_persisted_state(&state);
         }
+        app.performance
+            .set_history(app.workspace_config.benchmark_runs.clone());
         app
     }
 
@@ -255,6 +570,7 @@ impl WorkbenchApp {
                     self.selected_tab = match value {
                         "Gallery" => WorkbenchTab::Gallery,
                         "Demos" => WorkbenchTab::Demos,
+                        "Performance" => WorkbenchTab::Performance,
                         _ => WorkbenchTab::Dashboard,
                     };
                 }
@@ -324,6 +640,39 @@ impl WorkbenchApp {
                 WorkbenchCommand::ShowPalette => self.open_palette(window, cx),
             }
         }
+    }
+
+    fn run_benchmark_suite(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let run = self.performance.run_full_suite();
+        self.workspace_config.record_benchmark(run.clone());
+        if let Err(err) = self.config_store.save(&self.workspace_config) {
+            eprintln!("failed to persist benchmark run: {err}");
+        }
+
+        let message = format!(
+            "Scroll {:.1} FPS • Typing {:.1} ms • LSP {:.1} ms",
+            run.virtualization.avg_scroll_fps,
+            run.editor.avg_typing_latency_ms,
+            run.editor.avg_lsp_latency_ms
+        );
+
+        window.push_notification(
+            Notification::new("Benchmark suite complete")
+                .title("Benchmark suite complete")
+                .content(move |_, _| Text::new(message.clone()).into_any_element())
+                .with_type(NotificationType::Info),
+            cx,
+        );
+        cx.notify();
+    }
+
+    fn clear_benchmark_history(&mut self, cx: &mut Context<Self>) {
+        self.performance.clear_history();
+        self.workspace_config.benchmark_runs.clear();
+        if let Err(err) = self.config_store.save(&self.workspace_config) {
+            eprintln!("failed to clear benchmark history: {err}");
+        }
+        cx.notify();
     }
 
     fn open_palette(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -414,6 +763,9 @@ impl WorkbenchApp {
                 WorkbenchTab::Dashboard => self.render_dashboard(window, cx).into_any_element(),
                 WorkbenchTab::Gallery => self.render_gallery_tab(window, cx).into_any_element(),
                 WorkbenchTab::Demos => self.render_demos_tab(window, cx).into_any_element(),
+                WorkbenchTab::Performance => {
+                    self.render_performance_tab(window, cx).into_any_element()
+                }
             })
     }
 
@@ -533,12 +885,14 @@ impl WorkbenchApp {
                 WorkbenchTab::Dashboard => 0,
                 WorkbenchTab::Gallery => 1,
                 WorkbenchTab::Demos => 2,
+                WorkbenchTab::Performance => 3,
             })
             .on_click(cx.listener(|this, index, _, cx| {
                 this.selected_tab = match *index {
                     0 => WorkbenchTab::Dashboard,
                     1 => WorkbenchTab::Gallery,
-                    _ => WorkbenchTab::Demos,
+                    2 => WorkbenchTab::Demos,
+                    _ => WorkbenchTab::Performance,
                 };
                 this.persist_state(cx);
                 cx.notify();
@@ -547,7 +901,512 @@ impl WorkbenchApp {
                 Tab::new(self.translate(WorkbenchTab::Dashboard.label())).id("tab-dashboard"),
                 Tab::new(self.translate(WorkbenchTab::Gallery.label())).id("tab-gallery"),
                 Tab::new(self.translate(WorkbenchTab::Demos.label())).id("tab-demos"),
+                Tab::new(self.translate(WorkbenchTab::Performance.label())).id("tab-performance"),
             ])
+    }
+
+    fn render_performance_tab(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let history_count = self.performance.history.len();
+
+        v_flex()
+            .gap_5()
+            .child(
+                h_flex()
+                    .gap_3()
+                    .items_center()
+                    .child(
+                        Button::new("perf-run-suite")
+                            .label("Run benchmark suite")
+                            .icon(Icon::new(IconName::Timer))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.run_benchmark_suite(window, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("perf-clear-history")
+                            .ghost()
+                            .label("Clear history")
+                            .icon(Icon::new(IconName::Trash))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.clear_benchmark_history(cx);
+                            })),
+                    )
+                    .child(
+                        Text::new(format!("{} recorded runs", history_count))
+                            .text_color(cx.theme().muted_foreground),
+                    ),
+            )
+            .child(self.render_virtualization_panel(cx))
+            .child(self.render_editor_panel(window, cx))
+            .child(self.render_benchmark_history(cx))
+            .child(self.render_performance_docs(cx))
+    }
+
+    fn render_virtualization_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let summary = self.performance.virtualization_summary();
+        let benchmark = self.performance.virtualization_benchmark();
+        let (fps_series, latency_series, memory_series) = self.performance.virtualization_series();
+        let latest = self.performance.virtualization_samples.last().cloned();
+
+        let fps_chart = if fps_series.is_empty() {
+            Text::new("Capture scroll samples to see FPS trends.")
+                .text_color(cx.theme().muted_foreground)
+                .into_any_element()
+        } else {
+            div()
+                .flex_1()
+                .h(px(200.0))
+                .child(
+                    LineChart::new(fps_series.clone())
+                        .x(|(frame, _)| *frame)
+                        .y(|(_, value)| *value),
+                )
+                .into_any_element()
+        };
+
+        let latency_chart = if latency_series.is_empty() {
+            Text::new("Latency samples appear once the benchmark runs.")
+                .text_color(cx.theme().muted_foreground)
+                .into_any_element()
+        } else {
+            div()
+                .flex_1()
+                .h(px(200.0))
+                .child(
+                    LineChart::new(latency_series.clone())
+                        .x(|(frame, _)| *frame)
+                        .y(|(_, value)| *value),
+                )
+                .into_any_element()
+        };
+
+        let memory_chart = if memory_series.is_empty() {
+            Text::new("Memory tracking is populated during a run.")
+                .text_color(cx.theme().muted_foreground)
+                .into_any_element()
+        } else {
+            div()
+                .flex_1()
+                .h(px(200.0))
+                .child(
+                    LineChart::new(memory_series.clone())
+                        .x(|(frame, _)| *frame)
+                        .y(|(_, value)| *value),
+                )
+                .into_any_element()
+        };
+
+        let viewport_rows = benchmark.rows_per_viewport();
+        let buffered = benchmark.suggested_buffer();
+        let render_cost = benchmark.estimated_render_cost();
+
+        DashboardCard::new("Virtualized list benchmark")
+            .description("Simulates scroll performance against large GPUI lists and updates charts in real time.")
+            .child(
+                v_flex()
+                    .gap_3()
+                    .child(
+                        h_flex()
+                            .gap_4()
+                            .child(Text::new(format!("Avg FPS {:.1}", summary.avg_scroll_fps)).font_weight_semibold())
+                            .child(Text::new(format!("Avg latency {:.1} ms", summary.avg_render_latency_ms)))
+                            .child(Text::new(format!("Peak memory {:.1} MiB", summary.peak_memory_mib)))
+                            .child(Text::new(format!("Rows {}", summary.rows)))
+                            .child(Text::new(format!("Overscan {}", summary.overscan))),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                Button::new("perf-rows-100k")
+                                    .label("100k rows")
+                                    .when(self.performance.virtualization_rows == 100_000, |btn| btn.primary())
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.performance.adjust_virtualization_rows(100_000);
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("perf-rows-200k")
+                                    .label("200k rows")
+                                    .when(self.performance.virtualization_rows == 200_000, |btn| btn.primary())
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.performance.adjust_virtualization_rows(200_000);
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("perf-rows-400k")
+                                    .label("400k rows")
+                                    .when(self.performance.virtualization_rows == 400_000, |btn| btn.primary())
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.performance.adjust_virtualization_rows(400_000);
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("perf-overscan-128")
+                                    .label("Overscan 128")
+                                    .when(self.performance.virtualization_overscan == 128, |btn| btn.ghost())
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.performance.adjust_virtualization_overscan(128);
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("perf-overscan-256")
+                                    .label("Overscan 256")
+                                    .when(self.performance.virtualization_overscan == 256, |btn| btn.ghost())
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.performance.adjust_virtualization_overscan(256);
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("perf-capture-scroll")
+                                    .ghost()
+                                    .label("Capture scroll sample")
+                                    .icon(Icon::new(IconName::Workflow))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.performance.capture_virtualization_sample();
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Switch::new("perf-dense-layout")
+                                    .checked(self.performance.virtualization_dense_layout)
+                                    .label(Text::new("Dense rows"))
+                                    .on_click(cx.listener(|this, state, _, cx| {
+                                        this.performance.toggle_virtualization_density(*state);
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_3()
+                            .children([fps_chart, latency_chart, memory_chart]),
+                    )
+                    .child(
+                        Text::new(format!(
+                            "Rows per viewport: {viewport_rows} • Suggested buffer: {buffered} • Estimated render cost: {render_cost}",
+                        ))
+                        .text_color(cx.theme().muted_foreground),
+                    )
+                    .when_some(latest, |col, sample| {
+                        col.child(
+                            Text::new(format!(
+                                "Latest sample → {:.1} FPS / {:.1} ms / {:.1} MiB",
+                                sample.scroll_fps, sample.render_latency_ms, sample.memory_mib
+                            ))
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground),
+                        )
+                    }),
+            )
+    }
+
+    fn render_editor_panel(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let summary = self.performance.editor_summary();
+        let (typing_series, lsp_series, memory_series) = self.performance.editor_series();
+        let latest = self.performance.editor_samples.last().cloned();
+        let preview = self.performance.editor_preview();
+
+        let typing_chart = if typing_series.is_empty() {
+            Text::new("Typing latency samples appear during a run.")
+                .text_color(cx.theme().muted_foreground)
+                .into_any_element()
+        } else {
+            div()
+                .flex_1()
+                .h(px(200.0))
+                .child(
+                    LineChart::new(typing_series.clone())
+                        .x(|(frame, _)| *frame)
+                        .y(|(_, value)| *value),
+                )
+                .into_any_element()
+        };
+
+        let lsp_chart = if lsp_series.is_empty() {
+            Text::new("Language server latency populates after capturing samples.")
+                .text_color(cx.theme().muted_foreground)
+                .into_any_element()
+        } else {
+            div()
+                .flex_1()
+                .h(px(200.0))
+                .child(
+                    LineChart::new(lsp_series.clone())
+                        .x(|(frame, _)| *frame)
+                        .y(|(_, value)| *value),
+                )
+                .into_any_element()
+        };
+
+        let memory_chart = if memory_series.is_empty() {
+            Text::new("Memory impact becomes visible once the stress test runs.")
+                .text_color(cx.theme().muted_foreground)
+                .into_any_element()
+        } else {
+            div()
+                .flex_1()
+                .h(px(200.0))
+                .child(
+                    LineChart::new(memory_series.clone())
+                        .x(|(frame, _)| *frame)
+                        .y(|(_, value)| *value),
+                )
+                .into_any_element()
+        };
+
+        DashboardCard::new("Editor stress test")
+            .description("Loads a synthetic ~200k line buffer, tracks typing latency, LSP responsiveness, and memory consumption.")
+            .child(
+                v_flex()
+                    .gap_3()
+                    .child(
+                        h_flex()
+                            .gap_4()
+                            .child(Text::new(format!("Lines {}", summary.lines)).font_weight_semibold())
+                            .child(Text::new(format!("Typing {:.1} ms", summary.avg_typing_latency_ms)))
+                            .child(Text::new(format!("LSP {:.1} ms", summary.avg_lsp_latency_ms)))
+                            .child(Text::new(format!("Peak memory {:.1} MiB", summary.peak_memory_mib)))
+                            .child(
+                                Text::new(format!(
+                                    "Highlighting {} • LSP {}",
+                                    if summary.syntax_highlighting { "on" } else { "off" },
+                                    if summary.lsp_enabled { "on" } else { "off" }
+                                ))
+                                .text_color(cx.theme().muted_foreground),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                Button::new("perf-lines-100k")
+                                    .label("100k lines")
+                                    .when(self.performance.editor_lines == 100_000, |btn| btn.primary())
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.performance.adjust_editor_lines(100_000);
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("perf-lines-200k")
+                                    .label("200k lines")
+                                    .when(self.performance.editor_lines == 200_000, |btn| btn.primary())
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.performance.adjust_editor_lines(200_000);
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("perf-lines-400k")
+                                    .label("400k lines")
+                                    .when(self.performance.editor_lines == 400_000, |btn| btn.primary())
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.performance.adjust_editor_lines(400_000);
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("perf-capture-editor")
+                                    .ghost()
+                                    .label("Capture typing sample")
+                                    .icon(Icon::new(IconName::Pen))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.performance.capture_editor_sample();
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Switch::new("perf-highlight")
+                                    .checked(self.performance.editor_highlighting)
+                                    .label(Text::new("Syntax highlighting"))
+                                    .on_click(cx.listener(|this, state, _, cx| {
+                                        this.performance.toggle_highlighting(*state);
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Switch::new("perf-lsp")
+                                    .checked(self.performance.editor_lsp)
+                                    .label(Text::new("LSP updates"))
+                                    .on_click(cx.listener(|this, state, _, cx| {
+                                        this.performance.toggle_lsp(*state);
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_3()
+                            .children([typing_chart, lsp_chart, memory_chart]),
+                    )
+                    .child(
+                        render_snippet(
+                            "perf-editor-preview",
+                            format!(
+                                "Synthetic buffer preview ({} lines, highlighting {})",
+                                self.performance.editor_lines,
+                                if self.performance.editor_highlighting { "on" } else { "off" }
+                            ),
+                            preview,
+                            window,
+                            cx,
+                        ),
+                    )
+                    .when_some(latest, |col, sample| {
+                        col.child(
+                            Text::new(format!(
+                                "Latest sample → typing {:.1} ms / LSP {:.1} ms / {:.1} MiB",
+                                sample.typing_latency_ms,
+                                sample.lsp_latency_ms,
+                                sample.memory_mib
+                            ))
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground),
+                        )
+                    }),
+            )
+    }
+
+    fn render_benchmark_history(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.performance.history.is_empty() {
+            return DashboardCard::new("Benchmark history")
+                .description("Run the suite to populate virtualization and editor comparisons.")
+                .child(
+                    Text::new("No historical runs have been recorded yet.")
+                        .text_color(cx.theme().muted_foreground),
+                );
+        }
+
+        let mut recent: Vec<_> = self
+            .performance
+            .history
+            .iter()
+            .cloned()
+            .rev()
+            .take(12)
+            .collect();
+        recent.reverse();
+
+        let fps_history: Vec<(f32, f32)> = recent
+            .iter()
+            .enumerate()
+            .map(|(idx, run)| (idx as f32 + 1.0, run.virtualization.avg_scroll_fps))
+            .collect();
+        let typing_history: Vec<(f32, f32)> = recent
+            .iter()
+            .enumerate()
+            .map(|(idx, run)| (idx as f32 + 1.0, run.editor.avg_typing_latency_ms))
+            .collect();
+        let memory_history: Vec<(String, f32)> = recent
+            .iter()
+            .map(|run| (format!("Run {}", run.id), run.editor.peak_memory_mib))
+            .collect();
+
+        let fps_chart = div().flex_1().h(px(200.0)).child(
+            LineChart::new(fps_history.clone())
+                .x(|(sample, _)| *sample)
+                .y(|(_, value)| *value),
+        );
+
+        let typing_chart = div().flex_1().h(px(200.0)).child(
+            LineChart::new(typing_history.clone())
+                .x(|(sample, _)| *sample)
+                .y(|(_, value)| *value),
+        );
+
+        let memory_chart = div().flex_1().h(px(200.0)).child(
+            BarChart::new(memory_history.clone())
+                .x(|(label, _)| label.as_str())
+                .y(|(_, value)| *value),
+        );
+
+        let latest = recent.last().cloned();
+
+        let card = DashboardCard::new("Benchmark history")
+            .description("Compare virtualization FPS, typing latency, and memory across runs.")
+            .child(h_flex().gap_3().children([
+                fps_chart.into_any_element(),
+                typing_chart.into_any_element(),
+                memory_chart.into_any_element(),
+            ]));
+
+        if let Some(run) = latest {
+            card.child(
+                Text::new(format!(
+                    "Latest run {} → {:.1} FPS, {:.1} ms typing, {:.1} MiB peak",
+                    run.id,
+                    run.virtualization.avg_scroll_fps,
+                    run.editor.avg_typing_latency_ms,
+                    run.editor.peak_memory_mib
+                ))
+                .text_sm()
+                .text_color(cx.theme().muted_foreground),
+            )
+        } else {
+            card
+        }
+    }
+
+    fn render_performance_docs(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let methodology = vec![
+            "Virtualization samples simulate scroll workloads using overscan, row height, and dataset size to stress the renderer.",
+            "Rows/viewport and suggested buffer are derived from data::VirtualListBenchmark to keep heuristics aligned with component guidance.",
+            "Editor metrics synthesize keystroke and LSP timings while highlighting how feature toggles influence resource usage.",
+        ];
+        let practices = vec![
+            "Prefer fixed row heights when possible; it keeps virtualization math predictable and minimizes render churn.",
+            "Defer expensive formatting until rows become visible—gpui-component list cells can lazily hydrate detail views.",
+            "Throttle LSP updates for large files by batching edits; the stress test shows how latency spikes with eager syncs.",
+        ];
+        let limitations = vec![
+            "Metrics are synthesized inside the demo environment and should be calibrated against production telemetry.",
+            "Synthetic editor previews truncate after a few hundred lines to avoid overwhelming the UI renderer.",
+            "GPU timing data is approximated; attach tracy or wgpu capture tooling for hardware-level investigations.",
+        ];
+
+        Accordion::new("performance-docs")
+            .bordered(false)
+            .item(|item| {
+                item.title(Text::new("Methodology")).content(
+                    v_flex().gap_2().children(
+                        methodology
+                            .into_iter()
+                            .map(|entry| Text::new(entry).text_sm().into_any_element()),
+                    ),
+                )
+            })
+            .item(|item| {
+                item.title(Text::new("Optimization practices")).content(
+                    v_flex().gap_2().children(
+                        practices
+                            .into_iter()
+                            .map(|entry| Text::new(entry).text_sm().into_any_element()),
+                    ),
+                )
+            })
+            .item(|item| {
+                item.title(Text::new("Known limitations")).content(
+                    v_flex().gap_2().children(
+                        limitations
+                            .into_iter()
+                            .map(|entry| Text::new(entry).text_sm().into_any_element()),
+                    ),
+                )
+            })
     }
 
     fn render_dashboard(
@@ -608,6 +1467,13 @@ impl WorkbenchApp {
                         SidebarMenuItem::new("Automation")
                             .icon(Icon::new(IconName::Cpu))
                             .suffix(Text::new("Beta").text_xs()),
+                        SidebarMenuItem::new("Performance lab")
+                            .icon(Icon::new(IconName::Activity))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.selected_tab = WorkbenchTab::Performance;
+                                this.persist_state(cx);
+                                cx.notify();
+                            })),
                     ]),
                 ),
             )

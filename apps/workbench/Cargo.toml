@@ -12,3 +12,4 @@ designsystem.workspace = true
 components.workspace = true
 data.workspace = true
 platform.workspace = true
+chrono = "0.4"
