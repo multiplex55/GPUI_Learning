@@ -6,6 +6,7 @@ members = [
     "apps/demos/markdown_notes",
     "apps/demos/code_playground",
     "apps/demos/dashboard",
+    "apps/demos/webview",
     "crates/designsystem",
     "crates/components",
     "crates/data",
