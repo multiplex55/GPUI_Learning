@@ -11,6 +11,7 @@ members = [
     "crates/components",
     "crates/data",
     "crates/platform",
+    "xtask"
 ]
 resolver = "2"
 
@@ -30,3 +31,4 @@ designsystem = { path = "crates/designsystem" }
 components = { path = "crates/components" }
 data = { path = "crates/data" }
 platform = { path = "crates/platform" }
+clap = { version = "4.5.4", features = ["derive"] }

@@ -1,5 +1,5 @@
 [package]
-name = "gallery"
+name = "xtask"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,8 +7,4 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-gpui.workspace = true
-designsystem.workspace = true
-components.workspace = true
-platform.workspace = true
 clap.workspace = true

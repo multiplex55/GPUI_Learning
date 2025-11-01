@@ -1,5 +1,7 @@
+use std::str::FromStr;
 use std::time::Duration;
 
+use clap::Parser;
 use components::{docs::render_snippet, DockLayoutPanel, ThemeSwitch};
 use designsystem::{install_defaults, IconLoader, IconName, ThemeRegistry, ThemeVariant};
 use gpui::{
@@ -20,9 +22,155 @@ use gpui_component::{
 use platform::{bootstrap, CommandBus, ConfigStore, LocalizationRegistry};
 use unic_langid::{langid, LanguageIdentifier};
 
+#[derive(Debug, Clone, Parser)]
+#[command(name = "gallery", about = "Launch the GPUI component gallery", version, long_about = None)]
+struct GalleryCli {
+    /// Apply initial state before the gallery window appears.
+    #[arg(long = "open", value_name = "TARGET", value_parser = GalleryLaunchTarget::from_str)]
+    open: Vec<GalleryLaunchTarget>,
+}
+
+#[derive(Debug, Clone)]
+enum GalleryLaunchTarget {
+    Category(GalleryCategorySlug),
+    IconSet(IconSetSlug),
+    Theme(ThemeSelector),
+    PaletteOverlay,
+    DocsKeyboard,
+    Locale(LanguageIdentifier),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GalleryCategorySlug {
+    Inputs,
+    Navigation,
+    Feedback,
+    Data,
+    Layout,
+    Overlays,
+    Editors,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IconSetSlug {
+    Core,
+    Product,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ThemeSelector {
+    Light,
+    Dark,
+    HighContrast,
+}
+
+impl FromStr for GalleryLaunchTarget {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if let Some(category) = value.strip_prefix("category=") {
+            return GalleryCategorySlug::from_str(category).map(Self::Category);
+        }
+        if let Some(icon) = value.strip_prefix("icons=") {
+            return IconSetSlug::from_str(icon).map(Self::IconSet);
+        }
+        if let Some(theme) = value.strip_prefix("theme=") {
+            return ThemeSelector::from_str(theme).map(Self::Theme);
+        }
+        if let Some(locale) = value.strip_prefix("locale=") {
+            return LanguageIdentifier::from_str(locale)
+                .map(Self::Locale)
+                .map_err(|err| format!("invalid locale: {err}"));
+        }
+        match value {
+            "palette" | "palette-overlay" => Ok(Self::PaletteOverlay),
+            "docs=keyboard" | "docs" => Ok(Self::DocsKeyboard),
+            other => Err(format!("unknown open target: {other}")),
+        }
+    }
+}
+
+impl FromStr for GalleryCategorySlug {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "inputs" => Ok(Self::Inputs),
+            "navigation" => Ok(Self::Navigation),
+            "feedback" => Ok(Self::Feedback),
+            "data" => Ok(Self::Data),
+            "layout" => Ok(Self::Layout),
+            "overlays" => Ok(Self::Overlays),
+            "editors" => Ok(Self::Editors),
+            other => Err(format!("unknown category: {other}")),
+        }
+    }
+}
+
+impl GalleryCategorySlug {
+    fn index(self) -> usize {
+        match self {
+            Self::Inputs => 0,
+            Self::Navigation => 1,
+            Self::Feedback => 2,
+            Self::Data => 3,
+            Self::Layout => 4,
+            Self::Overlays => 5,
+            Self::Editors => 6,
+        }
+    }
+}
+
+impl FromStr for IconSetSlug {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "core" => Ok(Self::Core),
+            "product" => Ok(Self::Product),
+            other => Err(format!("unknown icon set: {other}")),
+        }
+    }
+}
+
+impl IconSetSlug {
+    fn index(self) -> usize {
+        match self {
+            Self::Core => 0,
+            Self::Product => 1,
+        }
+    }
+}
+
+impl FromStr for ThemeSelector {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "light" => Ok(Self::Light),
+            "dark" => Ok(Self::Dark),
+            "high-contrast" | "contrast" => Ok(Self::HighContrast),
+            other => Err(format!("unknown theme: {other}")),
+        }
+    }
+}
+
+impl ThemeSelector {
+    fn variant(self) -> ThemeVariant {
+        match self {
+            Self::Light => ThemeVariant::Light,
+            Self::Dark => ThemeVariant::Dark,
+            Self::HighContrast => ThemeVariant::HighContrast,
+        }
+    }
+}
+
 fn main() {
+    let cli = GalleryCli::parse();
+    let launch_targets = cli.open;
+
     let app = install_defaults(Application::new());
-    app.run(|cx| {
+    app.run(move |cx| {
         let registry = ThemeRegistry::new();
         registry.install(cx);
 
@@ -31,6 +179,7 @@ fn main() {
 
         let localization = seed_localization();
         let command_bus = CommandBus::new();
+        let pending_launches = launch_targets.clone();
 
         cx.open_window(
             WindowOptions {
@@ -44,8 +193,14 @@ fn main() {
             },
             move |window, cx| {
                 window.set_title("GPUI Component Gallery");
-                cx.new(|_| {
-                    GalleryApp::new(registry.clone(), localization.clone(), command_bus.clone())
+                let pending_launches = pending_launches.clone();
+                cx.new(move |_| {
+                    GalleryApp::new(
+                        registry.clone(),
+                        localization.clone(),
+                        command_bus.clone(),
+                        pending_launches.clone(),
+                    )
                 })
             },
         )
@@ -208,6 +363,7 @@ struct GalleryApp {
     icon_set: usize,
     layout_epoch: u64,
     theme_preview: ThemeVariant,
+    pending_launches: Vec<GalleryLaunchTarget>,
 }
 
 impl GalleryApp {
@@ -215,6 +371,7 @@ impl GalleryApp {
         theme_registry: ThemeRegistry,
         localization: LocalizationRegistry,
         command_bus: CommandBus<GalleryCommand>,
+        pending_launches: Vec<GalleryLaunchTarget>,
     ) -> Self {
         let receiver = command_bus.subscribe();
         Self {
@@ -229,6 +386,7 @@ impl GalleryApp {
             palette_overlay: false,
             icon_set: 0,
             layout_epoch: 0,
+            pending_launches,
         }
     }
 
@@ -246,6 +404,51 @@ impl GalleryApp {
                     self.layout_epoch = self.layout_epoch.wrapping_add(1);
                     cx.notify();
                 }
+            }
+        }
+    }
+
+    fn process_pending(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pending_launches.is_empty() {
+            return;
+        }
+        let launches = std::mem::take(&mut self.pending_launches);
+        for launch in launches {
+            self.apply_launch_target(launch, window, cx);
+        }
+    }
+
+    fn apply_launch_target(
+        &mut self,
+        target: GalleryLaunchTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match target {
+            GalleryLaunchTarget::Category(slug) => {
+                self.active_category = slug.index();
+                cx.notify();
+            }
+            GalleryLaunchTarget::IconSet(slug) => {
+                self.icon_set = slug.index();
+                cx.notify();
+            }
+            GalleryLaunchTarget::Theme(selector) => {
+                self.apply_theme(selector.variant(), cx);
+                window.refresh();
+            }
+            GalleryLaunchTarget::PaletteOverlay => {
+                self.palette_overlay = true;
+                cx.notify();
+            }
+            GalleryLaunchTarget::DocsKeyboard => {
+                self.active_category = GalleryCategorySlug::Navigation.index();
+                self.palette_overlay = true;
+                cx.notify();
+            }
+            GalleryLaunchTarget::Locale(locale) => {
+                self.locale = locale;
+                cx.notify();
             }
         }
     }
@@ -456,6 +659,89 @@ impl GalleryApp {
             )
     }
 
+    fn render_launcher(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        GroupBox::new()
+            .title(Text::new("Quick launcher").font_weight_semibold())
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new("jump-inputs")
+                            .label("Inputs")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.active_category = GalleryCategorySlug::Inputs.index();
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("jump-navigation")
+                            .label("Navigation")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.active_category = GalleryCategorySlug::Navigation.index();
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("jump-feedback")
+                            .label("Feedback")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.active_category = GalleryCategorySlug::Feedback.index();
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("jump-data")
+                            .label("Data display")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.active_category = GalleryCategorySlug::Data.index();
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new("quick-palette")
+                            .label("Show palette")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.palette_overlay = true;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("quick-dark")
+                            .label("Dark theme")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.apply_theme(ThemeVariant::Dark, cx);
+                                window.refresh();
+                            })),
+                    )
+                    .child(
+                        Button::new("quick-contrast")
+                            .label("High contrast")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.apply_theme(ThemeVariant::HighContrast, cx);
+                                window.refresh();
+                            })),
+                    ),
+            )
+            .child(doc_section(
+                "launcher-snippet",
+                "CLI shortcut",
+                r#"cargo run --package gallery -- --open category=navigation"#,
+                &[
+                    "Chain multiple --open flags (for example `--open theme=dark --open category=overlays`) to reproduce complex layouts.",
+                    "Use `cargo xtask gallery --target navigation` for an even shorter alias during smoke tests.",
+                ],
+                &[
+                    "Remember to quote arguments that contain equals signs when scripting in fish or PowerShell.",
+                ],
+                window,
+                cx,
+            ))
+    }
+
     fn render_category_tabs(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let selected = self
             .active_category
@@ -518,7 +804,7 @@ impl GalleryApp {
                     .title(Text::new("Buttons"))
                     .child(h_flex().gap_3().items_center().child(demo_button)),
             )
-            .child(render_snippet(
+            .child(doc_section(
                 "inputs-snippet",
                 "Button with knobs",
                 r#"let mut button = Button::new("primary")
@@ -529,6 +815,13 @@ if disabled {
     button = button.disabled(true);
 }
 button.build(window, cx);"#,
+                &[
+                    "Compose buttons through the `ButtonVariants` trait so styling stays consistent with the design system.",
+                    "Drive preview knobs from a dedicated state struct to keep live docs and demos in sync.",
+                ],
+                &[
+                    "Avoid mutating the returned button after calling `.build`—constructors consume builder state.",
+                ],
                 window,
                 cx,
             ))
@@ -555,7 +848,7 @@ button.build(window, cx);"#,
                     .title(Text::new("Segmented tabs"))
                     .child(tabs),
             )
-            .child(render_snippet(
+            .child(doc_section(
                 "nav-snippet",
                 "Keyboard navigation",
                 r#"TabBar::new("nav")
@@ -569,6 +862,13 @@ button.build(window, cx);"#,
         Tab::new("Boards"),
         Tab::new("Timeline"),
     ]);"#,
+                &[
+                    "Keep the selected index in state so hotkeys and UI always agree.",
+                    "Use `.with_variant(TabVariant::Segmented)` for keyboard-friendly, high-contrast tabs.",
+                ],
+                &[
+                    "Neglecting to call `cx.notify()` after updating `active` will leave the tab bar visually stale.",
+                ],
                 window,
                 cx,
             ))
@@ -596,12 +896,19 @@ button.build(window, cx);"#,
                     Alert::error("alert-error", Text::new("Escalate critical failures.")),
                 ]),
             ))
-            .child(render_snippet(
+            .child(doc_section(
                 "feedback-snippet",
                 "Alert usage",
                 r#"Alert::success("upload", Text::new("Upload complete"))
     .with_variant(AlertVariant::Success)
     .icon(IconName::CircleCheck);"#,
+                &[
+                    "Choose intent-specific variants so colors communicate status without additional copy.",
+                    "Pair iconography with concise descriptions to improve accessibility.",
+                ],
+                &[
+                    "Avoid stacking alerts without spacing—vertical rhythm keeps toast queues readable.",
+                ],
                 window,
                 cx,
             ))
@@ -617,12 +924,19 @@ button.build(window, cx);"#,
                     self.metric_card("NPS", "68", IconName::Heart, cx),
                 ]),
             ))
-            .child(render_snippet(
+            .child(doc_section(
                 "data-snippet",
                 "GroupBox",
                 r#"GroupBox::new()
     .title(Text::new("KPIs"))
     .child(h_flex().gap_4().children(metrics));"#,
+                &[
+                    "Use `GroupBox` to wrap related metrics so they inherit consistent spacing and titles.",
+                    "Combine iconography and typography to surface hierarchy inside metric cards.",
+                ],
+                &[
+                    "Avoid hard-coding widths—let flex layouts adapt to translations and longer labels.",
+                ],
                 window,
                 cx,
             ))
@@ -695,12 +1009,19 @@ button.build(window, cx);"#,
                         cx.notify();
                     })),
             )
-            .child(render_snippet(
+            .child(doc_section(
                 "layout-snippet",
                 "Reset layout command",
                 r#"command_bus.publish(GalleryCommand::ResetLayout);
 // Subscribers reset their layout epoch when they
 // receive the broadcast."#,
+                &[
+                    "Keep layout snapshots in sync by broadcasting a reset whenever dock geometry changes dramatically.",
+                    "Store the layout epoch in config so reloads pick up the latest state.",
+                ],
+                &[
+                    "Resetting without incrementing the epoch leaves resizable panels stuck with stale IDs.",
+                ],
                 window,
                 cx,
             ))
@@ -761,12 +1082,19 @@ button.build(window, cx);"#,
                 ),
             )
             .child(Text::new(docs).text_color(cx.theme().muted_foreground))
-            .child(render_snippet(
+            .child(doc_section(
                 "icons-snippet",
                 "Registering icons",
                 r#"for (stem, name) in IconLoader::all() {
     println!("{} -> {}", stem, name.asset_path());
 }"#,
+                &[
+                    "Bundle icons into small runtime sets so overlays only load what they need.",
+                    "Expose helper scripts that verify asset paths during CI to catch missing SVGs early.",
+                ],
+                &[
+                    "After adding SVGs, rebuild the workspace—cached icons will not update until the loader regenerates.",
+                ],
                 window,
                 cx,
             ))
@@ -783,7 +1111,7 @@ button.build(window, cx);"#,
                     .title(Text::new("Live markdown"))
                     .child(editor),
             )
-            .child(render_snippet(
+            .child(doc_section(
                 "editors-snippet",
                 "render_snippet helper",
                 r#"let snippet = render_snippet(
@@ -793,6 +1121,13 @@ button.build(window, cx);"#,
     window,
     cx,
 );"#,
+                &[
+                    "Wrap code examples with `render_snippet` so they inherit theme-aware styling.",
+                    "Keep snippet IDs stable—hot reload compares identifiers to preserve scroll position.",
+                ],
+                &[
+                    "Do not reuse snippet IDs across tabs or the editor will recycle the wrong buffer.",
+                ],
                 window,
                 cx,
             ))
@@ -802,6 +1137,7 @@ button.build(window, cx);"#,
 impl gpui::Render for GalleryApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.process_commands(cx);
+        self.process_pending(window, cx);
 
         v_flex()
             .size_full()
@@ -809,6 +1145,7 @@ impl gpui::Render for GalleryApp {
             .p_6()
             .bg(cx.theme().background)
             .child(self.render_header(window, cx))
+            .child(self.render_launcher(window, cx))
             .child(self.render_category_tabs(cx))
             .child(match self.active_category {
                 0 => self.render_inputs(window, cx).into_any_element(),
@@ -820,4 +1157,40 @@ impl gpui::Render for GalleryApp {
                 _ => self.render_editors(window, cx).into_any_element(),
             })
     }
+}
+
+fn doc_section(
+    id: &str,
+    title: &str,
+    code: &str,
+    best_practices: &[&str],
+    gotchas: &[&str],
+    window: &mut Window,
+    cx: &mut App,
+) -> impl IntoElement {
+    let snippet_id = format!("{id}-snippet");
+
+    v_flex()
+        .gap_3()
+        .child(render_snippet(snippet_id, title, code, window, cx))
+        .when(!best_practices.is_empty(), |col| {
+            col.child(GroupBox::new().title(Text::new("Best practices")).child(
+                v_flex().gap_2().children(best_practices.iter().map(|tip| {
+                    Text::new(*tip)
+                        .text_color(cx.theme().muted_foreground)
+                        .into_any_element()
+                })),
+            ))
+        })
+        .when(!gotchas.is_empty(), |col| {
+            col.child(
+                GroupBox::new()
+                    .title(Text::new("Gotchas"))
+                    .child(v_flex().gap_2().children(gotchas.iter().map(|tip| {
+                        Text::new(*tip)
+                            .text_color(cx.theme().danger)
+                            .into_any_element()
+                    }))),
+            )
+        })
 }

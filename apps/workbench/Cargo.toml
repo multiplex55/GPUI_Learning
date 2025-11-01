@@ -13,3 +13,10 @@ components.workspace = true
 data.workspace = true
 platform.workspace = true
 chrono = "0.4"
+
+clap.workspace = true
+data_explorer = { path = "../demos/data_explorer" }
+markdown_notes = { path = "../demos/markdown_notes" }
+code_playground = { path = "../demos/code_playground" }
+dashboard = { path = "../demos/dashboard" }
+webview_demo = { path = "../demos/webview" }

@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360" viewBox="0 0 640 360">
+  <rect width="640" height="360" fill="#111827" rx="24" />
+  <text x="50%" y="38%" dominant-baseline="middle" text-anchor="middle" font-family="Inter, sans-serif" font-size="28" fill="#f9fafb">
+    Workbench demo launcher
+  </text>
+  <text x="50%" y="58%" dominant-baseline="middle" text-anchor="middle" font-family="Inter, sans-serif" font-size="16" fill="#d1d5db">
+    CLI-aligned buttons for markdown notes, dashboards, explorers, and docs
+  </text>
+</svg>
