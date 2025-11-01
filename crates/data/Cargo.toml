@@ -7,3 +7,17 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+rand = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+
+[features]
+default = []
+async-loaders = ["tokio"]
+
+[dependencies.tokio]
+version = "1.38"
+features = ["macros", "rt", "time"]
+optional = true
