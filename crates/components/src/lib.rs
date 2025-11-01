@@ -1,6 +1,8 @@
 #![doc = include_str!("../README.md")]
 #![warn(clippy::pedantic, missing_docs, unreachable_pub)]
 
+pub mod docs;
+
 use designsystem::{IconLoader, IconName, ThemeRegistry, ThemeVariant};
 use gpui::{
     platform::keystroke::Keystroke, prelude::FluentBuilder as _, px, AnyElement, App, IntoElement,
