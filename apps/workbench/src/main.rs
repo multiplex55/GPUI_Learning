@@ -1,6 +1,8 @@
 use std::fmt::Write as _;
+use std::str::FromStr;
 
 use chrono::Utc;
+use clap::Parser;
 use components::{
     docs::render_snippet, DashboardCard, DockLayoutPanel, KpiGrid, KpiMetric, ThemeSwitch,
 };
@@ -15,6 +17,7 @@ use gpui_component::{
     alert::{Alert, AlertVariant},
     button::{Button, ButtonVariants as _},
     chart::{AreaChart, BarChart, LineChart, PieChart},
+    group_box::GroupBox,
     icon::Icon,
     kbd::Kbd,
     notification::{Notification, NotificationType},
@@ -32,9 +35,88 @@ use platform::{
 };
 use unic_langid::{langid, LanguageIdentifier};
 
+#[derive(Debug, Clone, Parser)]
+#[command(name = "workbench", about = "Launch the GPUI workbench shell", version, long_about = None)]
+struct WorkbenchCli {
+    /// Automatically open windows, demos, or auxiliary launchers.
+    #[arg(long = "open", value_name = "TARGET", value_parser = LaunchTarget::from_str)]
+    open: Vec<LaunchTarget>,
+}
+
+#[derive(Debug, Clone)]
+enum LaunchTarget {
+    Demo(DemoSlug),
+    GalleryWindow,
+    DemoLauncher,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DemoSlug {
+    DataExplorer,
+    MarkdownNotes,
+    CodePlayground,
+    OperationsDashboard,
+    WebviewDocs,
+}
+
+impl DemoSlug {
+    fn label(self) -> &'static str {
+        match self {
+            Self::DataExplorer => "Virtualized Data Explorer",
+            Self::MarkdownNotes => "Markdown Notes",
+            Self::CodePlayground => "Code Playground",
+            Self::OperationsDashboard => "Operations Dashboard",
+            Self::WebviewDocs => "Embedded Docs",
+        }
+    }
+
+    fn slug(self) -> &'static str {
+        match self {
+            Self::DataExplorer => "data-explorer",
+            Self::MarkdownNotes => "markdown-notes",
+            Self::CodePlayground => "code-playground",
+            Self::OperationsDashboard => "operations-dashboard",
+            Self::WebviewDocs => "webview",
+        }
+    }
+}
+
+impl FromStr for DemoSlug {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "data-explorer" | "data" => Ok(Self::DataExplorer),
+            "markdown-notes" | "notes" => Ok(Self::MarkdownNotes),
+            "code-playground" | "playground" => Ok(Self::CodePlayground),
+            "operations-dashboard" | "dashboard" => Ok(Self::OperationsDashboard),
+            "webview" | "docs" | "embedded-docs" => Ok(Self::WebviewDocs),
+            other => Err(format!("unknown demo target: {other}")),
+        }
+    }
+}
+
+impl FromStr for LaunchTarget {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if let Some(demo) = value.strip_prefix("demo=") {
+            return DemoSlug::from_str(demo).map(LaunchTarget::Demo);
+        }
+        match value {
+            "gallery" | "gallery-window" => Ok(LaunchTarget::GalleryWindow),
+            "demos" | "launcher" | "demo-launcher" => Ok(LaunchTarget::DemoLauncher),
+            other => Err(format!("unknown open target: {other}")),
+        }
+    }
+}
+
 fn main() {
+    let cli = WorkbenchCli::parse();
+    let launch_targets = cli.open;
+
     let app = install_defaults(Application::new());
-    app.run(|cx| {
+    app.run(move |cx| {
         gpui_component::init(cx);
 
         let registry = ThemeRegistry::new();
@@ -44,6 +126,7 @@ fn main() {
         let config = bootstrap(cx, &store).expect("workspace configuration");
         let localization = seed_localization();
         let command_bus = CommandBus::new();
+        let open_requests = launch_targets.clone();
 
         cx.open_window(
             WindowOptions {
@@ -57,14 +140,36 @@ fn main() {
             },
             move |window, cx| {
                 window.set_title("GPUI Workbench Shell");
-                let app = WorkbenchApp::new(
-                    registry.clone(),
-                    localization.clone(),
-                    command_bus.clone(),
-                    config.clone(),
-                    store.clone(),
-                );
-                cx.new(|_| app)
+                let open_requests = open_requests.clone();
+                let registry_for_app = registry.clone();
+                let localization_for_app = localization.clone();
+                let store_for_app = store.clone();
+                let config_for_app = config.clone();
+                let bus_for_app = command_bus.clone();
+                let bus_for_launch = command_bus.clone();
+                cx.new(move |_| {
+                    let mut app = WorkbenchApp::new(
+                        registry_for_app.clone(),
+                        localization_for_app.clone(),
+                        bus_for_app.clone(),
+                        config_for_app.clone(),
+                        store_for_app.clone(),
+                    );
+                    for target in &open_requests {
+                        match target {
+                            LaunchTarget::GalleryWindow => {
+                                bus_for_launch.publish(WorkbenchCommand::OpenGallery);
+                            }
+                            LaunchTarget::DemoLauncher => {
+                                bus_for_launch.publish(WorkbenchCommand::OpenDemos);
+                            }
+                            LaunchTarget::Demo(demo) => {
+                                bus_for_launch.publish(WorkbenchCommand::OpenDemo(*demo));
+                            }
+                        }
+                    }
+                    app
+                })
             },
         )
         .expect("workbench window");
@@ -159,6 +264,7 @@ enum WorkbenchCommand {
     ResetLayout,
     OpenGallery,
     OpenDemos,
+    OpenDemo(DemoSlug),
     ToggleTheme,
     ToggleLocale,
     ShowPalette,
@@ -632,7 +738,12 @@ impl WorkbenchApp {
                     );
                 }
                 WorkbenchCommand::OpenGallery => self.open_gallery_window(cx),
-                WorkbenchCommand::OpenDemos => self.open_demo_window(cx),
+                WorkbenchCommand::OpenDemos => {
+                    self.selected_tab = WorkbenchTab::Demos;
+                    self.open_demo_window(cx);
+                    cx.notify();
+                }
+                WorkbenchCommand::OpenDemo(demo) => self.open_demo(demo, window, cx),
                 WorkbenchCommand::ToggleTheme => {
                     self.cycle_theme(cx);
                 }
@@ -733,8 +844,110 @@ impl WorkbenchApp {
         .expect("gallery preview window");
     }
 
+    fn open_demo(&self, demo: DemoSlug, window: &mut Window, cx: &mut Context<Self>) {
+        match demo {
+            DemoSlug::DataExplorer => {
+                let registry = self.theme_registry.clone();
+                cx.open_window(
+                    WindowOptions {
+                        titlebar: Some("Data Explorer".into()),
+                        ..Default::default()
+                    },
+                    move |window, cx| {
+                        window.set_title("Virtualized Data Explorer");
+                        cx.new(|_| data_explorer::DataExplorerApp::new(registry.clone()))
+                    },
+                )
+                .expect("data explorer demo window");
+            }
+            DemoSlug::MarkdownNotes => {
+                let registry = self.theme_registry.clone();
+                let store = self.config_store.clone();
+                let config = self.workspace_config.clone();
+                cx.open_window(
+                    WindowOptions {
+                        titlebar: Some("Markdown Notes".into()),
+                        ..Default::default()
+                    },
+                    move |window, cx| {
+                        window.set_title("Markdown & Notes Workspace");
+                        cx.new(|_| {
+                            markdown_notes::MarkdownNotesApp::new(
+                                registry.clone(),
+                                store.clone(),
+                                config.clone(),
+                            )
+                        })
+                    },
+                )
+                .expect("markdown notes demo window");
+            }
+            DemoSlug::CodePlayground => {
+                let registry = self.theme_registry.clone();
+                cx.open_window(
+                    WindowOptions {
+                        titlebar: Some("Code Playground".into()),
+                        ..Default::default()
+                    },
+                    move |window, cx| {
+                        window.set_title("Code Playground with LSP");
+                        cx.new(|_| code_playground::CodePlaygroundApp::new(registry.clone()))
+                    },
+                )
+                .expect("code playground demo window");
+            }
+            DemoSlug::OperationsDashboard => {
+                let registry = self.theme_registry.clone();
+                cx.open_window(
+                    WindowOptions {
+                        titlebar: Some("Operations Dashboard".into()),
+                        ..Default::default()
+                    },
+                    move |window, cx| {
+                        window.set_title("Operations Control Center");
+                        cx.new(|_| dashboard::DashboardDemoApp::new(registry.clone()))
+                    },
+                )
+                .expect("dashboard demo window");
+            }
+            DemoSlug::WebviewDocs => {
+                if cfg!(feature = "webview") {
+                    #[cfg(feature = "webview")]
+                    {
+                        let registry = self.theme_registry.clone();
+                        cx.open_window(
+                            WindowOptions {
+                                titlebar: Some("Embedded Docs".into()),
+                                ..Default::default()
+                            },
+                            move |window, cx| {
+                                window.set_title("Webview Documentation");
+                                cx.new(|_| webview_demo::app::WebviewDemoApp::new(registry.clone()))
+                            },
+                        )
+                        .expect("webview demo window");
+                    }
+                } else {
+                    window.push_notification(
+                        Notification::new("Webview feature disabled")
+                            .title("Webview demo unavailable")
+                            .content(|_, _| {
+                                Text::new(
+                                    "Enable the `webview` feature flag and set FEATURE_WEBVIEW=1 to launch this demo.",
+                                )
+                                .into_any_element()
+                            })
+                            .with_type(NotificationType::Warning),
+                        cx,
+                    );
+                }
+            }
+        }
+    }
+
     fn open_demo_window(&self, cx: &mut Context<Self>) {
         let registry = self.theme_registry.clone();
+        let bus = self.command_bus.clone();
         cx.open_window(
             WindowOptions {
                 titlebar: Some("Demo Launchpad".into()),
@@ -742,7 +955,7 @@ impl WorkbenchApp {
             },
             move |window, cx| {
                 window.set_title("Demo Launchpad");
-                let view = DemoLauncher::new(registry.clone());
+                let view = DemoLauncher::new(registry.clone(), bus.clone());
                 cx.new(|_| view)
             },
         )
@@ -1669,6 +1882,13 @@ impl WorkbenchApp {
                         r#"BarChart::new(dataset)
     .x(|entry| entry.category)
     .y(|entry| entry.count);"#,
+                        &[
+                            "Keep categorical labels short and rotate them when rendering dozens of buckets.",
+                            "Group related series by stacking bars instead of overlaying multiple charts.",
+                        ],
+                        &[
+                            "Do not mix absolute and percentage counts in the same view—normalize first.",
+                        ],
                         window,
                         cx,
                     )),
@@ -1689,6 +1909,13 @@ impl WorkbenchApp {
                         r#"AreaChart::new(points)
     .x(|(label, _)| *label)
     .y(|(_, value)| *value);"#,
+                        &[
+                            "Layer cumulative metrics in declaration order so the legend matches the stack.",
+                            "Use semi-transparent fills to keep gridlines readable behind the area.",
+                        ],
+                        &[
+                            "Baseline drift hides negative trends—explicitly set `.baseline(0.0)` for balanced datasets.",
+                        ],
                         window,
                         cx,
                     )),
@@ -1709,6 +1936,13 @@ impl WorkbenchApp {
                         r#"PieChart::new(slices)
     .label(|slice| slice.name.clone())
     .value(|slice| slice.percent);"#,
+                        &[
+                            "Limit the slice count to highlight the top contributors and aggregate the rest into an 'Other'.",
+                            "Pair pies with numeric totals so screen readers can describe the distribution.",
+                        ],
+                        &[
+                            "Avoid pie charts for negative values—prefer a stacked bar or waterfall view.",
+                        ],
                         window,
                         cx,
                     )),
@@ -1728,6 +1962,13 @@ impl WorkbenchApp {
                         r#"if let Some(error) = wizard.error.clone() {
     Text::new(error).text_color(cx.theme().danger);
 }"#,
+                        &[
+                            "Persist wizard progress in `WizardState` so the UI survives window refreshes.",
+                            "Guard every transition with validation and return early when the user corrects inputs.",
+                        ],
+                        &[
+                            "Forgetting to reset `wizard.error` leaves stale messages on the next step.",
+                        ],
                         window,
                         cx,
                     )),
@@ -1745,6 +1986,13 @@ impl WorkbenchApp {
         this.validate_filters();
         cx.notify();
     }));"#,
+                        &[
+                            "Keep filter state in a dedicated struct so resets can reuse `Default::default()`.",
+                            "Disable expensive apply buttons until all required options are selected.",
+                        ],
+                        &[
+                            "Remember to debounce network-bound filters—spamming apply floods telemetry.",
+                        ],
                         window,
                         cx,
                     )),
@@ -2013,6 +2261,13 @@ impl WorkbenchApp {
         .with_type(NotificationType::Info),
     cx,
 );"#,
+                &[
+                    "Group notifications by domain key to avoid spamming the user with duplicates.",
+                    "Render actionable links inside the toast content so users can resolve issues inline.",
+                ],
+                &[
+                    "Always invoke `window.push_notification` from the UI thread—background threads must use the command bus.",
+                ],
                 window,
                 cx,
             ))
@@ -2026,6 +2281,13 @@ impl WorkbenchApp {
                 "Persisted layout",
                 r#"self.persist_state(cx);
 let snapshot = cx.global::<LayoutState>().0.clone();"#,
+                &[
+                    "Call `persist_state` after every user-driven mutation so the config store stays fresh.",
+                    "Keep the serialized snapshot human readable to simplify support diagnostics.",
+                ],
+                &[
+                    "Large layouts can exceed default config size limits—compress or rotate files when they grow beyond a few hundred KB.",
+                ],
                 window,
                 cx,
             ))
@@ -2033,6 +2295,13 @@ let snapshot = cx.global::<LayoutState>().0.clone();"#,
                 "commands-docs",
                 "Command bus",
                 r#"command_bus.publish(WorkbenchCommand::ResetLayout);"#,
+                &[
+                    "Create a dedicated enum for each subsystem so command payloads stay type safe.",
+                    "Publish commands instead of calling UI methods directly to keep business logic testable.",
+                ],
+                &[
+                    "Dropping the last receiver breaks broadcasts—store handles in your root app and refresh them on hot reload.",
+                ],
                 window,
                 cx,
             ))
@@ -2056,6 +2325,13 @@ let snapshot = cx.global::<LayoutState>().0.clone();"#,
     window.set_title("Gallery Preview");
     cx.new(|_| GalleryPreview::new(registry.clone(), localization.clone()))
 });"#,
+                &[
+                    "Clone the existing theme registry so gallery and workbench stay color-synchronized.",
+                    "Pipe localization handles through to keep category labels translated.",
+                ],
+                &[
+                    "Avoid opening multiple preview windows without tracking handles—each consumes GPU resources.",
+                ],
                 window,
                 cx,
             ))
@@ -2073,8 +2349,15 @@ let snapshot = cx.global::<LayoutState>().0.clone();"#,
                 "Open demo window",
                 r#"cx.open_window(WindowOptions::default(), move |window, cx| {
     window.set_title("Demo Launchpad");
-    cx.new(|_| DemoLauncher::new(theme_registry.clone()))
+    cx.new(|_| DemoLauncher::new(theme_registry.clone(), command_bus.clone()))
 });"#,
+                &[
+                    "Reuse the global command bus so launcher buttons trigger the host workbench.",
+                    "Pass cloned theme registries to keep demo windows aligned with the active palette.",
+                ],
+                &[
+                    "Forgetting to clone the command bus will move it into the closure and break other subscribers.",
+                ],
                 window,
                 cx,
             ))
@@ -2140,6 +2423,13 @@ impl gpui::Render for GalleryPreview {
 registry.install(cx);
 
 let preview = GalleryPreview::new(registry.clone(), localization.clone());"#,
+                &[
+                    "Install the registry once at startup and clone handles for additional windows.",
+                    "Share localization state so component labels match the active language.",
+                ],
+                &[
+                    "Forgetting to call `gpui_component::init` before cloning registries leaves previews without component styles.",
+                ],
                 window,
                 cx,
             ))
@@ -2148,11 +2438,15 @@ let preview = GalleryPreview::new(registry.clone(), localization.clone());"#,
 
 struct DemoLauncher {
     theme_registry: ThemeRegistry,
+    command_bus: CommandBus<WorkbenchCommand>,
 }
 
 impl DemoLauncher {
-    fn new(theme_registry: ThemeRegistry) -> Self {
-        Self { theme_registry }
+    fn new(theme_registry: ThemeRegistry, command_bus: CommandBus<WorkbenchCommand>) -> Self {
+        Self {
+            theme_registry,
+            command_bus,
+        }
     }
 }
 
@@ -2177,17 +2471,66 @@ impl gpui::Render for DemoLauncher {
             .child(
                 h_flex()
                     .gap_3()
-                    .child(Button::new("notes").label("Markdown notes"))
-                    .child(Button::new("analytics").label("Analytics dashboard"))
-                    .child(Button::new("explorer").label("Data explorer")),
+                    .child(
+                        Button::new("notes")
+                            .label("Markdown notes")
+                            .on_click(cx.listener(|this, _, _, _| {
+                                this
+                                    .command_bus
+                                    .publish(WorkbenchCommand::OpenDemo(DemoSlug::MarkdownNotes));
+                            })),
+                    )
+                    .child(
+                        Button::new("analytics")
+                            .label("Operations dashboard")
+                            .on_click(cx.listener(|this, _, _, _| {
+                                this
+                                    .command_bus
+                                    .publish(WorkbenchCommand::OpenDemo(DemoSlug::OperationsDashboard));
+                            })),
+                    )
+                    .child(
+                        Button::new("explorer")
+                            .label("Data explorer")
+                            .on_click(cx.listener(|this, _, _, _| {
+                                this
+                                    .command_bus
+                                    .publish(WorkbenchCommand::OpenDemo(DemoSlug::DataExplorer));
+                            })),
+                    )
+                    .child(
+                        Button::new("playground")
+                            .label("Code playground")
+                            .on_click(cx.listener(|this, _, _, _| {
+                                this
+                                    .command_bus
+                                    .publish(WorkbenchCommand::OpenDemo(DemoSlug::CodePlayground));
+                            })),
+                    )
+                    .child(
+                        Button::new("docs")
+                            .label("Embedded docs")
+                            .on_click(cx.listener(|this, _, _, _| {
+                                this
+                                    .command_bus
+                                    .publish(WorkbenchCommand::OpenDemo(DemoSlug::WebviewDocs));
+                            })),
+                    ),
             )
             .child(expandable_docs(
                 "demo-launcher-docs",
                 "Launch pattern",
                 r#"cx.open_window(WindowOptions::default(), move |window, cx| {
     window.set_title("Markdown Notes");
-    // mount demo view here
+    cx.new(|_| DemoLauncher::new(theme_registry.clone(), command_bus.clone()))
 });"#,
+                &[
+                    "Reuse the existing workbench command bus so launcher buttons can trigger shared actions.",
+                    "Clone registries and stores before entering the closure to avoid moving them.",
+                ],
+                &[
+                    "Opening launchers without cloning the bus will panic because the bus does not implement Copy.",
+                ],
                 window,
                 cx,
             ))
@@ -2198,6 +2541,8 @@ fn expandable_docs(
     id: &str,
     title: impl Into<SharedString>,
     code: &str,
+    best_practices: &[&str],
+    gotchas: &[&str],
     window: &mut Window,
     cx: &mut App,
 ) -> impl IntoElement {
@@ -2211,6 +2556,28 @@ fn expandable_docs(
                 .child(Text::new(title))
                 .child(Text::new("View code").text_color(cx.theme().muted_foreground)),
         )
-        .content(render_snippet(snippet_id, "Snippet", code, window, cx))
+        .content(
+            v_flex()
+                .gap_3()
+                .child(render_snippet(snippet_id, "Snippet", code, window, cx))
+                .when(!best_practices.is_empty(), |col| {
+                    col.child(GroupBox::new().title(Text::new("Best practices")).child(
+                        v_flex().gap_2().children(best_practices.iter().map(|tip| {
+                            Text::new(*tip)
+                                .text_color(cx.theme().muted_foreground)
+                                .into_any_element()
+                        })),
+                    ))
+                })
+                .when(!gotchas.is_empty(), |col| {
+                    col.child(GroupBox::new().title(Text::new("Gotchas")).child(
+                        v_flex().gap_2().children(gotchas.iter().map(|tip| {
+                            Text::new(*tip)
+                                .text_color(cx.theme().danger)
+                                .into_any_element()
+                        })),
+                    ))
+                }),
+        )
     })
 }
