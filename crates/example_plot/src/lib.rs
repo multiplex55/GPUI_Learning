@@ -4,7 +4,7 @@ use plotters::prelude::{
     BitMapBackend, ChartBuilder, DrawingAreaErrorKind, IntoDrawingArea, IntoFont, RGBColor,
     Rectangle, Text, BLACK, WHITE,
 };
-use plotters::style::Color;
+use plotters::style::{Color, FontDesc, FontFamily, FontStyle};
 use thiserror::Error;
 
 /// Errors that can occur while generating the demo plot image.
@@ -53,7 +53,10 @@ where
 
     let x_range = 0..checkpoints.len() as i32;
     let mut chart = ChartBuilder::on(&root)
-        .caption("Accessibility checklist coverage", ("sans-serif", 24))
+        .caption(
+            "Accessibility checklist coverage",
+            FontDesc::new(FontFamily::SansSerif, 24.0, FontStyle::Normal),
+        )
         .margin(20)
         .x_label_area_size(60)
         .y_label_area_size(60)
@@ -94,7 +97,9 @@ where
             Text::new(
                 text,
                 label_position,
-                ("sans-serif", 16).into_font().color(&BLACK),
+                FontDesc::new(FontFamily::SansSerif, 16.0, FontStyle::Normal)
+                    .into_font()
+                    .color(&BLACK),
             )
         }))
         .map_err(PlotGenerationError::from_plotters_error)?;
