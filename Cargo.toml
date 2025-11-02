@@ -8,6 +8,7 @@ members = [
     "apps/demos/dashboard",
     "apps/demos/webview",
     "crates/designsystem",
+    "crates/example_plot",
     "crates/components",
     "crates/data",
     "crates/platform",

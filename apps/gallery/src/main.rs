@@ -5,14 +5,16 @@ use clap::Parser;
 use components::{docs::render_snippet, DockLayoutPanel, ThemeSwitch};
 use designsystem::{install_defaults, IconLoader, IconName, ThemeRegistry, ThemeVariant};
 use gpui::{
-    div, prelude::*, px, size, App, Application, Bounds, Context, SharedString, Timer, Window,
-    WindowBounds, WindowOptions,
+    div, prelude::*, px, size, AnyElement, App, Application, Bounds, Context, SharedString, Timer,
+    Window, WindowBounds, WindowOptions,
 };
+use gpui::platform::keystroke::Keystroke;
 use gpui_component::{
     alert::{Alert, AlertVariant},
     button::{Button, ButtonVariants as _},
     group_box::GroupBox,
     icon::Icon,
+    kbd::Kbd,
     resizable::{h_resizable, resizable_panel},
     styled::{h_flex, v_flex, StyledExt as _},
     switch::Switch,
@@ -323,10 +325,10 @@ const ICON_SETS: &[IconSetDescriptor] = &[
         name: "Product",
         description: "Feature-specific glyphs loaded at runtime.",
         icons: &[
-            IconName::ChartPie,
-            IconName::Calendar,
-            IconName::Globe,
-            IconName::LayoutDashboard,
+            IconName::ProductAccessibility,
+            IconName::ProductPalette,
+            IconName::ProductLocalization,
+            IconName::ProductShortcuts,
         ],
     },
 ];
@@ -364,6 +366,34 @@ struct GalleryApp {
     layout_epoch: u64,
     theme_preview: ThemeVariant,
     pending_launches: Vec<GalleryLaunchTarget>,
+    command_palette_open: bool,
+}
+
+#[derive(Clone, Copy)]
+struct PaletteAction {
+    id: &'static str,
+    label: &'static str,
+    description: &'static str,
+    shortcut: &'static str,
+    handler: fn(&mut GalleryApp, &mut Window, &mut Context<GalleryApp>),
+}
+
+impl PaletteAction {
+    const fn new(
+        id: &'static str,
+        label: &'static str,
+        description: &'static str,
+        shortcut: &'static str,
+        handler: fn(&mut GalleryApp, &mut Window, &mut Context<GalleryApp>),
+    ) -> Self {
+        Self {
+            id,
+            label,
+            description,
+            shortcut,
+            handler,
+        }
+    }
 }
 
 impl GalleryApp {
@@ -387,6 +417,7 @@ impl GalleryApp {
             icon_set: 0,
             layout_epoch: 0,
             pending_launches,
+            command_palette_open: false,
         }
     }
 
@@ -444,7 +475,9 @@ impl GalleryApp {
             GalleryLaunchTarget::DocsKeyboard => {
                 self.active_category = GalleryCategorySlug::Navigation.index();
                 self.palette_overlay = true;
+                self.command_palette_open = true;
                 cx.notify();
+                window.refresh();
             }
             GalleryLaunchTarget::Locale(locale) => {
                 self.locale = locale;
@@ -527,6 +560,62 @@ impl GalleryApp {
             )
     }
 
+    fn render_shortcut_keys(&self, keys: &[&str]) -> AnyElement {
+        let mut row = h_flex().gap_1().items_center();
+        for key in keys {
+            if key.contains('+') {
+                for token in key.split('+') {
+                    row = row.child(self.render_single_key(token));
+                }
+            } else {
+                row = row.child(self.render_single_key(key));
+            }
+        }
+        row.into_any_element()
+    }
+
+    fn render_single_key(&self, token: &str) -> AnyElement {
+        match token {
+            "arrowleft" => return Text::new("←").into_any_element(),
+            "arrowright" => return Text::new("→").into_any_element(),
+            "arrowup" => return Text::new("↑").into_any_element(),
+            "arrowdown" => return Text::new("↓").into_any_element(),
+            _ => {}
+        }
+        if let Ok(parsed) = Keystroke::parse(token) {
+            Kbd::new(parsed).appearance(true).into_any_element()
+        } else {
+            Text::new(token.to_uppercase()).into_any_element()
+        }
+    }
+
+    fn render_keyboard_shortcuts(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let rows: &[(&[&str], &str)] = &[
+            (&["tab"], "Move focus forward"),
+            (&["shift+tab"], "Move focus backward"),
+            (&["arrowleft"], "Previous category tab"),
+            (&["arrowright"], "Next category tab"),
+            (&["ctrl+k"], "Open the command palette"),
+        ];
+
+        GroupBox::new()
+            .title(Text::new("Keyboard navigation").font_weight_semibold())
+            .child(
+                v_flex().gap_2().children(rows.iter().map(|(keys, description)| {
+                    h_flex()
+                        .gap_3()
+                        .items_center()
+                        .child(self.render_shortcut_keys(keys))
+                        .child(
+                            Text::new(*description)
+                                .text_color(cx.theme().muted_foreground)
+                                .size(13.0),
+                        )
+                        .into_any_element()
+                })),
+            )
+    }
+
     fn render_header(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme_controls = self.render_theme_controls(window, cx);
 
@@ -542,7 +631,97 @@ impl GalleryApp {
                             .text_color(cx.theme().muted_foreground),
                     ),
             )
-            .child(theme_controls)
+            .child(
+                v_flex()
+                    .gap_3()
+                    .child(theme_controls)
+                    .child(
+                        Button::new("open-command-palette")
+                            .ghost()
+                            .icon(Icon::new(IconName::Search))
+                            .label("Command palette")
+                            .child(
+                                h_flex()
+                                    .gap_1()
+                                    .ml_auto()
+                                    .child(self.render_shortcut_keys(&["ctrl+k"])),
+                            )
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.command_palette_open = true;
+                                cx.notify();
+                                window.refresh();
+                            })),
+                    ),
+            )
+    }
+
+    fn palette_actions(&self) -> &'static [PaletteAction] {
+        PALETTE_ACTIONS
+    }
+
+    fn render_command_palette(
+        &mut self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let actions = self.palette_actions();
+
+        GroupBox::new()
+            .title(Text::new("Command palette").font_weight_semibold())
+            .child(
+                v_flex()
+                    .gap_3()
+                    .child(
+                        Text::new("Run keyboard-first actions without leaving the keyboard.")
+                            .text_color(cx.theme().muted_foreground)
+                            .size(13.0),
+                    )
+                    .children(actions.iter().enumerate().map(|(ix, action)| {
+                        let handler = action.handler;
+                        let shortcut = action.shortcut;
+                        let description = action.description;
+                        let mut button = Button::new(format!("palette-action-{ix}"))
+                            .label(action.label)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.command_palette_open = false;
+                                handler(this, window, cx);
+                                cx.notify();
+                            }));
+                        if let Ok(parsed) = Keystroke::parse(shortcut) {
+                            button = button.child(
+                                h_flex()
+                                    .gap_1()
+                                    .ml_auto()
+                                    .child(Kbd::new(parsed).appearance(true)),
+                            );
+                        }
+
+                        v_flex()
+                            .gap_1()
+                            .child(button)
+                            .child(
+                                Text::new(description)
+                                    .text_color(cx.theme().muted_foreground)
+                                    .size(12.0),
+                            )
+                            .into_any_element()
+                    }))
+                    .child(
+                        h_flex()
+                            .justify_end()
+                            .child(
+                                Button::new("palette-close")
+                                    .ghost()
+                                    .label("Close")
+                                    .child(self.render_shortcut_keys(&["escape"]))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.command_palette_open = false;
+                                        cx.notify();
+                                        window.refresh();
+                                    })),
+                            ),
+                    ),
+            )
     }
 
     fn render_theme_controls(
@@ -1088,12 +1267,13 @@ button.build(window, cx);"#,
                 r#"for (stem, name) in IconLoader::all() {
     println!("{} -> {}", stem, name.asset_path());
 }"#,
-                &[
+                &[ 
                     "Bundle icons into small runtime sets so overlays only load what they need.",
-                    "Expose helper scripts that verify asset paths during CI to catch missing SVGs early.",
+                    "Normalize new packs with `cargo xtask icons --pack product <dir>` so SVG attributes match gpui expectations.",
                 ],
                 &[
                     "After adding SVGs, rebuild the workspace—cached icons will not update until the loader regenerates.",
+                    "Use `--clean` when importing if you need to replace an entire pack; otherwise files accumulate.",
                 ],
                 window,
                 cx,
@@ -1145,6 +1325,7 @@ impl gpui::Render for GalleryApp {
             .p_6()
             .bg(cx.theme().background)
             .child(self.render_header(window, cx))
+            .child(self.render_keyboard_shortcuts(cx))
             .child(self.render_launcher(window, cx))
             .child(self.render_category_tabs(cx))
             .child(match self.active_category {
@@ -1156,8 +1337,95 @@ impl gpui::Render for GalleryApp {
                 5 => self.render_overlays(window, cx).into_any_element(),
                 _ => self.render_editors(window, cx).into_any_element(),
             })
+            .when(self.command_palette_open, |content| {
+                content.child(self.render_command_palette(window, cx))
+            })
     }
 }
+
+fn action_focus_inputs(
+    app: &mut GalleryApp,
+    _window: &mut Window,
+    cx: &mut Context<GalleryApp>,
+) {
+    app.active_category = GalleryCategorySlug::Inputs.index();
+    cx.notify();
+}
+
+fn action_focus_overlays(
+    app: &mut GalleryApp,
+    _window: &mut Window,
+    cx: &mut Context<GalleryApp>,
+) {
+    app.active_category = GalleryCategorySlug::Overlays.index();
+    cx.notify();
+}
+
+fn action_switch_high_contrast(
+    app: &mut GalleryApp,
+    window: &mut Window,
+    cx: &mut Context<GalleryApp>,
+) {
+    app.apply_theme(ThemeVariant::HighContrast, cx);
+    window.refresh();
+}
+
+fn action_toggle_palette_overlay(
+    app: &mut GalleryApp,
+    window: &mut Window,
+    cx: &mut Context<GalleryApp>,
+) {
+    app.palette_overlay = !app.palette_overlay;
+    cx.notify();
+    window.refresh();
+}
+
+fn action_reset_layout(
+    app: &mut GalleryApp,
+    _window: &mut Window,
+    cx: &mut Context<GalleryApp>,
+) {
+    app.command_bus.publish(GalleryCommand::ResetLayout);
+    cx.notify();
+}
+
+static PALETTE_ACTIONS: &[PaletteAction] = &[
+    PaletteAction::new(
+        "palette-inputs",
+        "Focus inputs category",
+        "Moves the gallery focus to the Inputs showcase tab for quick inspection.",
+        "ctrl+1",
+        action_focus_inputs,
+    ),
+    PaletteAction::new(
+        "palette-overlays",
+        "Jump to overlay demos",
+        "Opens the overlay examples so keyboard navigation can be verified.",
+        "ctrl+2",
+        action_focus_overlays,
+    ),
+    PaletteAction::new(
+        "palette-theme-contrast",
+        "Switch to high-contrast theme",
+        "Applies the accessibility-tuned palette for contrast audits.",
+        "ctrl+shift+h",
+        action_switch_high_contrast,
+    ),
+    PaletteAction::new(
+        "palette-overlay-toggle",
+        "Toggle palette inspector",
+        "Shows or hides the live token inspector for color reviews.",
+        "ctrl+.",
+        action_toggle_palette_overlay,
+    ),
+    PaletteAction::new(
+        "palette-reset-layout",
+        "Reset demo layout",
+        "Broadcasts a layout reset so panels return to their starting sizes.",
+        "ctrl+shift+r",
+        action_reset_layout,
+    ),
+];
 
 fn doc_section(
     id: &str,

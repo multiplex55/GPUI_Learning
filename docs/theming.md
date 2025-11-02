@@ -10,6 +10,8 @@ The design system exposes a [`ThemeRegistry`](../apps/gallery/src/main.rs) that 
 - Install the registry once per GPUI `Application` and clone handles for additional windows; this keeps theme transitions cheap and atomic.
 - Drive theme selection through the command bus or launch targets so documentation and automation stay aligned.
 - When adding new tokens, update the palette inspector strings to keep in-app docs authoritative.
+- Run `cargo test -p designsystem contrast` after changing colours; the test suite enforces a minimum 4.5:1 contrast for light/dark
+  and 7:1 for the high-contrast variant.
 
 ## Gotchas
 - Forgetting to call `gpui_component::init(cx)` before cloning the registry results in unstyled components for newly spawned windows.

@@ -31,7 +31,7 @@ fn main() -> io::Result<()> {
 
     writeln!(
         file,
-        "#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]\npub enum IconName {{"
+        "/// Strongly typed identifier for a design system icon.\n#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]\npub enum IconName {{"
     )?;
 
     for entry in &entries {
@@ -42,6 +42,7 @@ fn main() -> io::Result<()> {
             .unwrap()
             .to_string_lossy();
         let variant = stem.replace('-', " ").to_upper_camel_case();
+        writeln!(file, "    /// Icon asset generated from `{stem}.svg`.")?;
         writeln!(file, "    {variant},")?;
     }
 
@@ -49,7 +50,7 @@ fn main() -> io::Result<()> {
 
     writeln!(
         file,
-        "impl IconName {{\n    pub const ALL: &'static [IconName] = &["
+        "#[allow(missing_docs)]\nimpl IconName {{\n    pub const ALL: &'static [IconName] = &["
     )?;
     for entry in &entries {
         let file_name = entry.file_name();
@@ -92,7 +93,7 @@ fn main() -> io::Result<()> {
             .join(&*file_name);
         writeln!(
             file,
-            "            IconName::{variant} => include_str!(\"{}\"),",
+            "            IconName::{variant} => include_str!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/{}\")),",
             icon_path.display()
         )?;
     }
@@ -104,7 +105,7 @@ fn main() -> io::Result<()> {
 
     writeln!(
         file,
-        "pub const ICON_NAMES: &[(&'static str, IconName)] = &["
+        "/// Lookup table that maps icon stems to strongly typed names.\npub(crate) const ICON_NAMES: &[(&'static str, IconName)] = &["
     )?;
     for entry in &entries {
         let file_name = entry.file_name();

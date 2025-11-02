@@ -1,6 +1,14 @@
-use std::{error::Error, process::Command};
+use std::{
+    env,
+    error::Error,
+    fs,
+    io::{self, Read},
+    path::PathBuf,
+    process::Command,
+};
 
 use clap::{Parser, Subcommand, ValueEnum};
+use heck::ToKebabCase;
 
 fn main() {
     if let Err(err) = Xtask::parse().run() {
@@ -43,6 +51,17 @@ enum XtaskCommand {
         #[arg(long)]
         open: bool,
     },
+    /// Normalize raw SVGs into the design system's icon pack.
+    Icons {
+        /// Directory containing raw SVG assets.
+        input: PathBuf,
+        /// Target pack that determines the output prefix.
+        #[arg(long, value_enum, default_value_t = IconPack::Product)]
+        pack: IconPack,
+        /// Remove existing icons for the selected pack before importing.
+        #[arg(long)]
+        clean: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -79,6 +98,21 @@ enum GalleryScenario {
     PaletteOverlay,
 }
 
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum IconPack {
+    Core,
+    Product,
+}
+
+impl IconPack {
+    fn prefix(self) -> &'static str {
+        match self {
+            Self::Core => "core",
+            Self::Product => "product",
+        }
+    }
+}
+
 impl Xtask {
     fn run(self) -> Result<(), Box<dyn Error>> {
         match self.command {
@@ -86,27 +120,33 @@ impl Xtask {
                 scenario,
                 standalone,
             } => {
+                let mut command = Command::new("cargo");
                 if standalone {
-                    run(Command::new("cargo").args(["run", "--package", scenario.package_name()]))
+                    command.args(["run", "--package", scenario.package_name()]);
                 } else {
-                    run(Command::new("cargo").args([
+                    command.args([
                         "run",
                         "--bin",
                         "workbench",
                         "--",
                         "--open",
                         scenario.launch_arg(),
-                    ]))
+                    ]);
                 }
+                run(command)
             }
-            XtaskCommand::Gallery { target } => run(Command::new("cargo").args([
-                "run",
-                "--package",
-                "gallery",
-                "--",
-                "--open",
-                target.launch_arg(),
-            ])),
+            XtaskCommand::Gallery { target } => {
+                let mut command = Command::new("cargo");
+                command.args([
+                    "run",
+                    "--package",
+                    "gallery",
+                    "--",
+                    "--open",
+                    target.launch_arg(),
+                ]);
+                run(command)
+            }
             XtaskCommand::Docs { open } => {
                 let mut command = Command::new("cargo");
                 command.args(["doc", "--workspace", "--all-features", "--no-deps"]);
@@ -115,7 +155,80 @@ impl Xtask {
                 }
                 run(command)
             }
+            XtaskCommand::Icons { input, pack, clean } => self.import_icons(input, pack, clean),
         }
+    }
+}
+
+impl Xtask {
+    fn import_icons(
+        &self,
+        input: PathBuf,
+        pack: IconPack,
+        clean: bool,
+    ) -> Result<(), Box<dyn Error>> {
+        let input_dir = if input.is_relative() {
+            std::env::current_dir()?.join(input)
+        } else {
+            input
+        };
+
+        if !input_dir.exists() {
+            return Err(format!("input directory '{}' not found", input_dir.display()).into());
+        }
+
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let workspace_root = manifest_dir
+            .parent()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "workspace root"))?
+            .to_path_buf();
+        let dest_dir = workspace_root.join("crates/designsystem/icons");
+
+        fs::create_dir_all(&dest_dir)?;
+
+        if clean {
+            for entry in fs::read_dir(&dest_dir)? {
+                let entry = entry?;
+                if entry
+                    .path()
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(|name| name.starts_with(pack.prefix()))
+                    .unwrap_or(false)
+                {
+                    fs::remove_file(entry.path())?;
+                }
+            }
+        }
+
+        let mut imported = 0usize;
+        for entry in fs::read_dir(&input_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("svg") {
+                continue;
+            }
+            let mut svg = String::new();
+            fs::File::open(&path)?.read_to_string(&mut svg)?;
+            let normalized = normalize_svg(&svg);
+            let stem = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or("icon")
+                .to_kebab_case();
+            let filename = format!("{}-{}.svg", pack.prefix(), stem);
+            let dest_path = dest_dir.join(filename);
+            fs::write(&dest_path, normalized)?;
+            imported += 1;
+        }
+
+        println!(
+            "Imported {imported} {} icon(s) into {}",
+            pack.prefix(),
+            dest_dir.display()
+        );
+
+        Ok(())
     }
 }
 
@@ -163,4 +276,27 @@ fn run(mut command: Command) -> Result<(), Box<dyn Error>> {
     } else {
         Err(format!("command exited with status {status}").into())
     }
+}
+
+fn normalize_svg(source: &str) -> String {
+    let mut svg = source.trim().to_string();
+    if !svg.contains("fill=\"none\"") {
+        svg = svg.replacen("<svg", "<svg fill=\"none\"", 1);
+    }
+    if !svg.contains("stroke=\"currentColor\"") {
+        svg = svg.replacen("<svg", "<svg stroke=\"currentColor\"", 1);
+    }
+    if !svg.contains("stroke-width=") {
+        svg = svg.replacen("<svg", "<svg stroke-width=\"2\"", 1);
+    }
+    if !svg.contains("stroke-linecap=") {
+        svg = svg.replacen("<svg", "<svg stroke-linecap=\"round\"", 1);
+    }
+    if !svg.contains("stroke-linejoin=") {
+        svg = svg.replacen("<svg", "<svg stroke-linejoin=\"round\"", 1);
+    }
+    if !svg.ends_with('\n') {
+        svg.push('\n');
+    }
+    svg
 }

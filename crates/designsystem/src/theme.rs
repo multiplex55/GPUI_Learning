@@ -6,26 +6,28 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use gpui::{px, App, Global};
+use gpui::{px, App};
 use gpui_component::theme::{Theme, ThemeConfig, ThemeConfigColors, ThemeMode};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::tokens::{
-    dark_tokens, high_contrast_tokens, light_tokens, ColorPalette, DesignTokens, TypographyScale,
-};
+use crate::tokens::{dark_tokens, high_contrast_tokens, light_tokens, DesignTokens};
 
 /// Available theme variants shipped with the design system.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ThemeVariant {
+    /// Default light theme optimized for bright environments.
     Light,
+    /// Dark theme tuned for low-light readability.
     Dark,
+    /// High contrast theme targeting accessibility needs.
     HighContrast,
 }
 
 impl ThemeVariant {
     #[must_use]
+    /// Returns the string slug used for the variant.
     pub const fn as_str(self) -> &'static str {
         match self {
             ThemeVariant::Light => "light",
@@ -53,8 +55,11 @@ pub enum ThemeError {
 /// Complete definition for a workspace theme variant.
 #[derive(Debug, Clone)]
 pub struct ThemeDefinition {
+    /// Variant identifier for this definition.
     pub variant: ThemeVariant,
+    /// Generated design tokens associated with the variant.
     pub tokens: DesignTokens,
+    /// GPUI theme configuration applied when the variant is active.
     pub config: ThemeConfig,
 }
 
@@ -255,7 +260,8 @@ mod tests {
 
     #[test]
     fn typography_sizes_propagate() {
-        let definition = ThemeRegistry::new().definition(ThemeVariant::HighContrast);
+        let registry = ThemeRegistry::new();
+        let definition = registry.definition(ThemeVariant::HighContrast);
         assert!(definition.tokens.typography.body > 16.0);
     }
 }
