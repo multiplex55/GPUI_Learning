@@ -155,14 +155,15 @@ impl Xtask {
                 }
                 run(command)
             }
-            XtaskCommand::Icons { input, pack, clean } => self.import_icons(input, pack, clean),
+            XtaskCommand::Icons { input, pack, clean } => {
+                Self::import_icons(input, pack, clean)
+            }
         }
     }
 }
 
 impl Xtask {
     fn import_icons(
-        &self,
         input: PathBuf,
         pack: IconPack,
         clean: bool,
