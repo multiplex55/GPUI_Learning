@@ -8,6 +8,9 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+mod assets;
+pub use assets::{AssetBundle, AssetSpec, EMBEDDED_ASSETS};
+
 use chrono::{DateTime, Utc};
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use directories::ProjectDirs;

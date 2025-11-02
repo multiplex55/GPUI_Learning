@@ -35,7 +35,7 @@ impl AssetSource for IconAssetSource {
 
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
         if path.is_empty() {
-            return Ok(vec![SharedString::from_static("designsystem/icons")]);
+            return Ok(vec![SharedString::new_static("designsystem/icons")]);
         }
 
         if path == "designsystem/icons" {

@@ -49,5 +49,6 @@ Publish the rendered docs by copying `target/doc` into the `docs/api` folder (tr
 - [Localization strategy](docs/localization.md)
 - [Contribution workflow](docs/contributing.md)
 - [Performance notes](docs/performance.md)
+- [Accessibility checklist](docs/accessibility.md)
 
 These guides expand on the in-app callouts, list best practices vs. gotchas, and document the new automation commands.

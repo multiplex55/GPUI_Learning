@@ -8,3 +8,4 @@ publish = false
 
 [dependencies]
 clap.workspace = true
+heck = "0.5"
