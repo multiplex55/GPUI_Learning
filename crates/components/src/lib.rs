@@ -6,7 +6,7 @@ pub mod docs;
 use designsystem::{IconLoader, IconName, ThemeRegistry, ThemeVariant};
 use gpui::{
     platform::keystroke::Keystroke, prelude::FluentBuilder as _, px, AnyElement, App, IntoElement,
-    ParentElement, SharedString, Window,
+    ParentElement, RenderOnce, SharedString, Window,
 };
 use gpui_component::{
     button::{Button, ButtonVariants as _},
@@ -20,7 +20,7 @@ use gpui_component::{
 use smallvec::SmallVec;
 
 /// Card component tailored for dashboard summaries.
-#[derive(Default)]
+#[derive(Default, IntoElement)]
 pub struct DashboardCard {
     title: SharedString,
     description: Option<SharedString>,
@@ -67,27 +67,12 @@ impl ParentElement for DashboardCard {
     }
 }
 
-impl IntoElement for DashboardCard {
-    type Element = DashboardCardElement;
-
-    fn into_element(self) -> Self::Element {
-        DashboardCardElement(self)
-    }
-}
-
-/// Adapter so that [`DashboardCard`] can implement [`RenderOnce`].
-pub struct DashboardCardElement(DashboardCard);
-
-gpui::impl_render_once!(DashboardCardElement);
-
-gpui::impl_widget_render!(
-    DashboardCardElement,
-    |this: DashboardCardElement, _window: &mut Window, cx: &mut App| {
-        let card = this.0;
+impl RenderOnce for DashboardCard {
+    fn render(self, _window: &mut Window, cx: &mut App) -> AnyElement {
         let title_block = v_flex()
             .gap_1()
-            .child(Text::new(card.title.clone()).size(18.0))
-            .when_some(card.description.clone(), |col, description| {
+            .child(Text::new(self.title.clone()).size(18.0))
+            .when_some(self.description.clone(), |col, description| {
                 col.child(
                     Text::new(description)
                         .text_color(cx.theme().muted_foreground)
@@ -98,7 +83,7 @@ gpui::impl_widget_render!(
         let header = h_flex()
             .gap_3()
             .items_center()
-            .when_some(card.icon, |row, icon| {
+            .when_some(self.icon, |row, icon| {
                 row.child(
                     Icon::default()
                         .path(IconLoader::asset_path(icon))
@@ -106,16 +91,17 @@ gpui::impl_widget_render!(
                 )
             })
             .child(title_block)
-            .when(!card.actions.is_empty(), |row| {
-                row.child(h_flex().gap_2().ml_auto().children(card.actions))
+            .when(!self.actions.is_empty(), |row| {
+                row.child(h_flex().gap_2().ml_auto().children(self.actions))
             });
 
         GroupBox::new()
             .fill()
             .title(header)
-            .child(v_flex().gap_3().children(card.body))
+            .child(v_flex().gap_3().children(self.body))
+            .into_any_element()
     }
-);
+}
 
 /// Metric descriptor rendered inside a [`KpiGrid`].
 #[derive(Debug, Clone)]
@@ -158,7 +144,7 @@ impl KpiMetric {
 }
 
 /// Responsive grid for arranging KPI blocks.
-#[derive(Default)]
+#[derive(Default, IntoElement)]
 pub struct KpiGrid {
     metrics: SmallVec<[KpiMetric; 4]>,
 }
@@ -172,42 +158,41 @@ impl KpiGrid {
     }
 }
 
-gpui::impl_render_once!(KpiGrid);
+impl RenderOnce for KpiGrid {
+    fn render(self, _window: &mut Window, cx: &mut App) -> AnyElement {
+        let cells = self
+            .metrics
+            .into_iter()
+            .map(|metric| {
+                let mut block = v_flex().gap_1();
+                if let Some(icon) = metric.icon {
+                    block = block.child(
+                        Icon::default()
+                            .path(IconLoader::asset_path(icon))
+                            .size_5()
+                            .text_color(cx.theme().accent),
+                    );
+                }
+                block
+                    .child(Text::new(metric.value).size(22.0).font_weight_bold())
+                    .child(Text::new(metric.label).text_color(cx.theme().muted_foreground))
+                    .when_some(metric.trend, |col, trend| {
+                        col.child(Text::new(trend).text_color(cx.theme().accent))
+                    })
+            })
+            .map(IntoElement::into_any_element)
+            .collect();
 
-gpui::impl_widget_render!(KpiGrid, |grid: KpiGrid,
-                                    _window: &mut Window,
-                                    cx: &mut App| {
-    let cells = grid
-        .metrics
-        .into_iter()
-        .map(|metric| {
-            let mut block = v_flex().gap_1();
-            if let Some(icon) = metric.icon {
-                block = block.child(
-                    Icon::default()
-                        .path(IconLoader::asset_path(icon))
-                        .size_5()
-                        .text_color(cx.theme().accent),
-                );
-            }
-            block
-                .child(Text::new(metric.value).size(22.0).font_weight_bold())
-                .child(Text::new(metric.label).text_color(cx.theme().muted_foreground))
-                .when_some(metric.trend, |col, trend| {
-                    col.child(Text::new(trend).text_color(cx.theme().accent))
-                })
-        })
-        .map(IntoElement::into_any_element)
-        .collect();
-
-    h_flex()
-        .flex_wrap()
-        .gap_6()
-        .child(v_flex().gap_4().children(cells))
-});
+        h_flex()
+            .flex_wrap()
+            .gap_6()
+            .child(v_flex().gap_4().children(cells))
+            .into_any_element()
+    }
+}
 
 /// High level dock-like layout with a sidebar and primary panel.
-#[derive(Default)]
+#[derive(Default, IntoElement)]
 pub struct DockLayoutPanel {
     sidebar: SmallVec<[AnyElement; 2]>,
     toolbar: SmallVec<[AnyElement; 2]>,
@@ -236,11 +221,8 @@ impl ParentElement for DockLayoutPanel {
     }
 }
 
-gpui::impl_render_once!(DockLayoutPanel);
-
-gpui::impl_widget_render!(
-    DockLayoutPanel,
-    |panel: DockLayoutPanel, _window: &mut Window, cx: &mut App| {
+impl RenderOnce for DockLayoutPanel {
+    fn render(self, _window: &mut Window, cx: &mut App) -> AnyElement {
         h_flex()
             .gap_4()
             .child(
@@ -250,14 +232,14 @@ gpui::impl_widget_render!(
                     .bg(cx.theme().muted)
                     .p_4()
                     .rounded(cx.theme().radius)
-                    .children(panel.sidebar),
+                    .children(self.sidebar),
             )
             .child(
                 v_flex()
                     .gap_4()
                     .flex_1()
-                    .child(h_flex().gap_2().when(!panel.toolbar.is_empty(), |row| {
-                        row.children(panel.toolbar.clone())
+                    .child(h_flex().gap_2().when(!self.toolbar.is_empty(), |row| {
+                        row.children(self.toolbar.clone())
                     }))
                     .child(
                         v_flex()
@@ -265,13 +247,15 @@ gpui::impl_widget_render!(
                             .bg(cx.theme().popover)
                             .p_6()
                             .rounded(cx.theme().radius_lg)
-                            .children(panel.content),
+                            .children(self.content),
                     ),
             )
+            .into_any_element()
     }
-);
+}
 
 /// A themed switch that flips between the light and dark modes.
+#[derive(IntoElement)]
 pub struct ThemeSwitch {
     id: SharedString,
     registry: ThemeRegistry,
@@ -297,17 +281,14 @@ impl ThemeSwitch {
     }
 }
 
-gpui::impl_render_once!(ThemeSwitch);
-
-gpui::impl_widget_render!(
-    ThemeSwitch,
-    |switch: ThemeSwitch, window: &mut Window, cx: &mut App| {
-        let registry = switch.registry.clone();
+impl RenderOnce for ThemeSwitch {
+    fn render(self, window: &mut Window, cx: &mut App) -> AnyElement {
+        let registry = self.registry.clone();
         let checked = !matches!(registry.active(), ThemeVariant::Light);
 
-        Switch::new(switch.id.clone())
+        Switch::new(self.id.clone())
             .checked(checked)
-            .when_some(switch.label.clone(), |s, label| s.label(Text::new(label)))
+            .when_some(self.label.clone(), |s, label| s.label(Text::new(label)))
             .on_click(move |state, window, cx| {
                 let variant = if *state {
                     ThemeVariant::Dark
@@ -320,9 +301,10 @@ gpui::impl_widget_render!(
             .tooltip("Toggle workspace theme")
             .build(window, cx)
     }
-);
+}
 
 /// Button styled trigger that opens a command palette.
+#[derive(IntoElement)]
 pub struct CommandPaletteTrigger {
     id: SharedString,
     label: SharedString,
@@ -348,21 +330,18 @@ impl CommandPaletteTrigger {
     }
 }
 
-gpui::impl_render_once!(CommandPaletteTrigger);
-
-gpui::impl_widget_render!(
-    CommandPaletteTrigger,
-    |trigger: CommandPaletteTrigger, window: &mut Window, cx: &mut App| {
-        let mut button = Button::new(trigger.id.clone())
+impl RenderOnce for CommandPaletteTrigger {
+    fn render(self, window: &mut Window, cx: &mut App) -> AnyElement {
+        let mut button = Button::new(self.id.clone())
             .ghost()
             .icon(
                 Icon::default()
-                    .path(IconLoader::asset_path(trigger.icon))
+                    .path(IconLoader::asset_path(self.icon))
                     .text_color(cx.theme().foreground),
             )
-            .label(trigger.label.clone());
+            .label(self.label.clone());
 
-        if let Some(shortcut) = trigger.shortcut.clone() {
+        if let Some(shortcut) = self.shortcut.clone() {
             if let Ok(key) = Keystroke::parse(&shortcut) {
                 button = button.child(
                     h_flex()
@@ -376,7 +355,7 @@ gpui::impl_widget_render!(
 
         button.build(window, cx)
     }
-);
+}
 
 #[cfg(test)]
 mod tests {
